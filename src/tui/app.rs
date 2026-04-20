@@ -476,7 +476,35 @@ impl App {
             Action::SetTheme(name) => {
                 self.set_theme(&name);
             }
+            Action::LaunchCxs => {
+                self.launch_cxs(terminal)?;
+            }
         }
+        Ok(())
+    }
+
+    fn launch_cxs(
+        &mut self,
+        terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>,
+    ) -> Result<()> {
+        let status = self.with_raw_mode_disabled(terminal, || {
+            std::process::Command::new("cxs")
+                .env("CXS_NO_TUI", "1")
+                .status()
+        })?;
+
+        self.needs_redraw = true;
+        crate::tmux::refresh_session_cache();
+        self.home.reload()?;
+
+        if let Err(e) = status {
+            tracing::warn!("cxs launch returned error: {}", e);
+            self.home.info_dialog = Some(crate::tui::dialogs::InfoDialog::new(
+                "cxs failed",
+                &format!("Could not launch cxs: {}. Is ~/scripts/cxs on PATH?", e),
+            ));
+        }
+
         Ok(())
     }
 
@@ -728,6 +756,7 @@ pub enum Action {
     EditFile(PathBuf),
     StopSession(String),
     SetTheme(String),
+    LaunchCxs,
 }
 
 #[cfg(test)]
