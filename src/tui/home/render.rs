@@ -777,117 +777,118 @@ impl HomeView {
         let key_style = Style::default().fg(theme.accent).bold();
         let desc_style = Style::default().fg(theme.dimmed);
         let sep_style = Style::default().fg(theme.border);
+        let strict = self.strict_hotkeys;
 
-        let mut spans: Vec<Span> = Vec::new();
+        // Priority-tagged shortcut groups. Lower priority = kept longer when
+        // the terminal is narrow (iPhone Moshi landscape ~80 cols). Essentials
+        // (Nav / Enter / Help / Quit / Serve indicator) survive first; Batch,
+        // Search, Diff, Mode drop first. Groups render in the declared order;
+        // a │ separator is inserted between kept groups at render time.
+        let mk = |key: &str, desc: &str| -> Vec<Span<'static>> {
+            vec![
+                Span::styled(format!(" {}", key), key_style),
+                Span::styled(format!(" {} ", desc), desc_style),
+            ]
+        };
 
-        // Serve indicator: shown only when the `aoe serve` daemon is live.
-        // The TUI does not own the daemon, so we probe the PID file each
-        // render. Mode comes from a PID-keyed cache so we don't read the
-        // serve.mode file from disk on every frame; the cache invalidates
-        // whenever the daemon PID changes (restart / fresh spawn).
+        let mut groups: Vec<(u8, Vec<Span<'static>>)> = Vec::new();
+
         #[cfg(feature = "serve")]
         {
             let mode_label = crate::cli::serve::cached_serve_mode_label();
-            // cached_serve_mode_label() returns None both for "no daemon"
-            // and "daemon but mode unknown", so check the daemon PID to
-            // distinguish — only render the indicator when there's a
-            // daemon, with the mode tag if we have it.
             if crate::cli::serve::daemon_pid().is_some() {
                 let label = match mode_label {
                     Some(m) => format!(" \u{25CF} Serving ({}) ", m),
                     None => " \u{25CF} Serving ".to_string(),
                 };
-                spans.extend([
-                    Span::styled(label, Style::default().fg(theme.running).bold()),
-                    Span::styled("│", sep_style),
-                ]);
+                groups.push((
+                    0,
+                    vec![Span::styled(
+                        label,
+                        Style::default().fg(theme.running).bold(),
+                    )],
+                ));
             }
         }
 
-        spans.extend([
-            Span::styled(" j/k", key_style),
-            Span::styled(" Nav ", desc_style),
-        ]);
+        groups.push((0, mk("j/k", "Nav")));
+
         if let Some(enter_action_text) = match self.flat_items.get(self.cursor) {
             Some(Item::Group {
                 collapsed: true, ..
-            }) => Some(" Expand "),
+            }) => Some("Expand"),
             Some(Item::Group {
                 collapsed: false, ..
-            }) => Some(" Collapse "),
-            Some(Item::Session { .. }) => Some(" Attach "),
+            }) => Some("Collapse"),
+            Some(Item::Session { .. }) => Some("Attach"),
             None => None,
         } {
-            spans.extend([
-                Span::styled("│", sep_style),
-                Span::styled(" Enter", key_style),
-                Span::styled(enter_action_text, desc_style),
-            ])
+            groups.push((0, mk("Enter", enter_action_text)));
         }
-        let strict = self.strict_hotkeys;
-        spans.extend([
-            Span::styled("│", sep_style),
-            Span::styled(if strict { " T" } else { " t" }, key_style),
-            Span::styled(" View ", desc_style),
-            Span::styled("│", sep_style),
-            Span::styled(if strict { " ^G" } else { " g" }, key_style),
-            Span::styled(" Group ", desc_style),
-        ]);
 
-        // Show c: container/host hint for sandboxed sessions in Terminal view
+        groups.push((2, mk(if strict { "T" } else { "t" }, "View")));
+        groups.push((3, mk(if strict { "^G" } else { "g" }, "Group")));
+
         if self.view_mode == ViewMode::Terminal {
             if let Some(id) = &self.selected_session {
                 if let Some(inst) = self.get_instance(id) {
                     if inst.is_sandboxed() {
-                        spans.extend([
-                            Span::styled("│", sep_style),
-                            Span::styled(if strict { " C" } else { " c" }, key_style),
-                            Span::styled(" Mode ", desc_style),
-                        ]);
+                        groups.push((4, mk(if strict { "C" } else { "c" }, "Mode")));
                     }
                 }
             }
         }
 
-        spans.extend([
-            Span::styled("│", sep_style),
-            Span::styled(if strict { " N" } else { " n" }, key_style),
-            Span::styled(" New ", desc_style),
-            Span::styled("│", sep_style),
-            Span::styled(if strict { " B" } else { " b" }, key_style),
-            Span::styled(" Batch ", desc_style),
-        ]);
+        groups.push((2, mk(if strict { "N" } else { "n" }, "New")));
+        groups.push((4, mk(if strict { "B" } else { "b" }, "Batch")));
 
         if self.selected_session.is_some() {
-            spans.extend([
-                Span::styled("│", sep_style),
-                Span::styled(if strict { " M" } else { " m" }, key_style),
-                Span::styled(" Msg ", desc_style),
-            ]);
+            groups.push((3, mk(if strict { "M" } else { "m" }, "Msg")));
         }
-
         if !self.flat_items.is_empty() {
-            spans.extend([
-                Span::styled("│", sep_style),
-                Span::styled(if strict { " D" } else { " d" }, key_style),
-                Span::styled(" Del ", desc_style),
-            ]);
+            groups.push((3, mk(if strict { "D" } else { "d" }, "Del")));
         }
 
-        spans.extend([
-            Span::styled("│", sep_style),
-            Span::styled(" /", key_style),
-            Span::styled(" Search ", desc_style),
-            Span::styled("│", sep_style),
-            Span::styled(if strict { " ^D" } else { " D" }, key_style),
-            Span::styled(" Diff ", desc_style),
-            Span::styled("│", sep_style),
-            Span::styled(" ?", key_style),
-            Span::styled(" Help ", desc_style),
-            Span::styled("│", sep_style),
-            Span::styled(if strict { " Q" } else { " q" }, key_style),
-            Span::styled(" Quit", desc_style),
-        ]);
+        groups.push((4, mk("/", "Search")));
+        groups.push((4, mk(if strict { "^D" } else { "D" }, "Diff")));
+        groups.push((0, mk("?", "Help")));
+        groups.push((0, mk(if strict { "Q" } else { "q" }, "Quit")));
+
+        // Greedy pack by priority. Width of a group = sum of span char counts;
+        // separator between kept groups adds 1 col each.
+        let widths: Vec<usize> = groups
+            .iter()
+            .map(|(_, g)| g.iter().map(|s| s.content.chars().count()).sum::<usize>())
+            .collect();
+        let avail = area.width as usize;
+
+        let mut order: Vec<usize> = (0..groups.len()).collect();
+        order.sort_by_key(|&i| groups[i].0);
+
+        let mut keep = vec![false; groups.len()];
+        let mut used = 0usize;
+        let mut count = 0usize;
+        for i in order {
+            let sep = if count == 0 { 0 } else { 1 };
+            if used + widths[i] + sep <= avail {
+                keep[i] = true;
+                used += widths[i] + sep;
+                count += 1;
+            }
+        }
+
+        let mut spans: Vec<Span> = Vec::new();
+        let mut first = true;
+        for (i, (_, group)) in groups.into_iter().enumerate() {
+            if !keep[i] {
+                continue;
+            }
+            if !first {
+                spans.push(Span::styled("│", sep_style));
+            }
+            spans.extend(group);
+            first = false;
+        }
 
         let status = Paragraph::new(Line::from(spans)).style(Style::default().bg(theme.selection));
         frame.render_widget(status, area);
