@@ -1530,6 +1530,9 @@ fn test_o_key_cycles_sort_order_forward() {
     assert_eq!(env.view.sort_order, SortOrder::Newest);
 
     env.view.handle_key(key(KeyCode::Char('o')));
+    assert_eq!(env.view.sort_order, SortOrder::Attention);
+
+    env.view.handle_key(key(KeyCode::Char('o')));
     assert_eq!(env.view.sort_order, SortOrder::LastActivity);
 
     env.view.handle_key(key(KeyCode::Char('o')));
@@ -1573,6 +1576,10 @@ fn test_ctrl_o_key_cycles_sort_order_backward() {
 
     env.view
         .handle_key(KeyEvent::new(KeyCode::Char('o'), KeyModifiers::CONTROL));
+    assert_eq!(env.view.sort_order, SortOrder::Attention);
+
+    env.view
+        .handle_key(KeyEvent::new(KeyCode::Char('o'), KeyModifiers::CONTROL));
     assert_eq!(env.view.sort_order, SortOrder::Newest);
 }
 
@@ -1584,7 +1591,8 @@ fn test_o_key_flat_items_sorted_az() {
     let mut env = create_test_env_with_mixed_sessions();
     assert_eq!(env.view.sort_order, SortOrder::Newest);
 
-    // Press 'o' three times to get to AZ (Newest -> LastActivity -> Oldest -> AZ)
+    // Press 'o' four times to get to AZ (Newest -> Attention -> LastActivity -> Oldest -> AZ)
+    env.view.handle_key(key(KeyCode::Char('o')));
     env.view.handle_key(key(KeyCode::Char('o')));
     env.view.handle_key(key(KeyCode::Char('o')));
     env.view.handle_key(key(KeyCode::Char('o')));
@@ -1617,8 +1625,9 @@ fn test_o_key_flat_items_sorted_za() {
 
     let mut env = create_test_env_with_mixed_sessions();
 
-    // Press 'o' four times to get to ZA
-    // (Newest -> LastActivity -> Oldest -> AZ -> ZA)
+    // Press 'o' five times to get to ZA
+    // (Newest -> Attention -> LastActivity -> Oldest -> AZ -> ZA)
+    env.view.handle_key(key(KeyCode::Char('o')));
     env.view.handle_key(key(KeyCode::Char('o')));
     env.view.handle_key(key(KeyCode::Char('o')));
     env.view.handle_key(key(KeyCode::Char('o')));
@@ -1652,8 +1661,9 @@ fn test_o_key_flat_items_newest_preserves_insertion_order() {
 
     let mut env = create_test_env_with_mixed_sessions();
 
-    // Press 'o' five times to wrap back to Newest
-    // (Newest -> LastActivity -> Oldest -> AZ -> ZA -> Newest)
+    // Press 'o' six times to wrap back to Newest
+    // (Newest -> Attention -> LastActivity -> Oldest -> AZ -> ZA -> Newest)
+    env.view.handle_key(key(KeyCode::Char('o')));
     env.view.handle_key(key(KeyCode::Char('o')));
     env.view.handle_key(key(KeyCode::Char('o')));
     env.view.handle_key(key(KeyCode::Char('o')));
@@ -1701,7 +1711,7 @@ fn test_o_key_clamps_cursor_when_list_shrinks() {
     assert!(filtered_count < initial_items);
 
     env.view.handle_key(key(KeyCode::Char('o')));
-    assert_eq!(env.view.sort_order, SortOrder::LastActivity);
+    assert_eq!(env.view.sort_order, SortOrder::Attention);
 
     let valid_max = env.view.flat_items.len().saturating_sub(1);
     assert!(env.view.cursor <= valid_max);

@@ -281,7 +281,7 @@ where
     match sort_order {
         SortOrder::AZ => items.sort_by_key(|a| key(a).to_lowercase()),
         SortOrder::ZA => items.sort_by_key(|b| std::cmp::Reverse(key(b).to_lowercase())),
-        SortOrder::Newest | SortOrder::Oldest | SortOrder::LastActivity => {}
+        SortOrder::Newest | SortOrder::Oldest | SortOrder::LastActivity | SortOrder::Attention => {}
     }
 }
 
@@ -344,6 +344,53 @@ fn last_activity_group_key(
     (ts.is_none(), Reverse(ts))
 }
 
+/// Priority tier for the Attention sort. Lower = higher priority = closer to
+/// the top of the list. See `docs/plans/2026-04-21-aoe-attention-sort.md` for
+/// the full rationale on tier choices.
+fn attention_tier(status: crate::session::Status) -> u8 {
+    use crate::session::Status::*;
+    match status {
+        Waiting => 0,                        // agent paused, needs human input — TOP priority
+        Error => 1,                          // something broke, needs intervention
+        Idle => 2,                           // turn complete, ready for next prompt
+        Unknown => 3,                        // status undetermined, glance warranted
+        Stopped => 4,                        // dormant
+        Running => 5,                        // actively working, leave alone
+        Starting | Creating | Deleting => 6, // transient, sink to bottom
+    }
+}
+
+/// Key used to sort sessions by Attention. Primary = priority tier ascending,
+/// secondary = last_accessed_at descending (so the most recently-bumped
+/// Waiting row is at the top of the Waiting cluster).
+fn attention_session_key(inst: &Instance) -> (u8, bool, Reverse<Option<DateTime<Utc>>>) {
+    (
+        attention_tier(inst.status),
+        inst.last_accessed_at.is_none(),
+        Reverse(inst.last_accessed_at),
+    )
+}
+
+/// Key used to sort groups by Attention. Uses the highest-priority (lowest
+/// tier) among the group's direct and nested sessions. Empty groups sink.
+fn attention_group_key(
+    path: &str,
+    instances: &[Instance],
+) -> (u8, bool, Reverse<Option<DateTime<Utc>>>) {
+    let prefix = format!("{}/", path);
+    let members: Vec<&Instance> = instances
+        .iter()
+        .filter(|i| i.group_path == path || i.group_path.starts_with(&prefix))
+        .collect();
+    let min_tier = members
+        .iter()
+        .map(|i| attention_tier(i.status))
+        .min()
+        .unwrap_or(u8::MAX);
+    let max_last = members.iter().filter_map(|i| i.last_accessed_at).max();
+    (min_tier, max_last.is_none(), Reverse(max_last))
+}
+
 /// Flatten instances from multiple profiles into a single flat list.
 /// Merges all profiles' sessions and groups at depth 0 (no profile headers).
 /// Uses per-profile GroupTrees so collapsed state is isolated per profile.
@@ -364,6 +411,7 @@ pub fn flatten_tree_all_profiles(
         SortOrder::Oldest => ungrouped.sort_by_key(|i| i.created_at),
         SortOrder::Newest => ungrouped.sort_by_key(|i| Reverse(i.created_at)),
         SortOrder::LastActivity => ungrouped.sort_by_key(|i| last_activity_session_key(i)),
+        SortOrder::Attention => ungrouped.sort_by_key(|i| attention_session_key(i)),
         SortOrder::AZ | SortOrder::ZA => sort_by_name(&mut ungrouped, sort_order, |i| &i.title),
     }
 
@@ -396,6 +444,9 @@ pub fn flatten_tree_all_profiles(
         }
         SortOrder::LastActivity => {
             all_roots.sort_by_key(|(_, g, insts)| last_activity_group_key(&g.path, insts));
+        }
+        SortOrder::Attention => {
+            all_roots.sort_by_key(|(_, g, insts)| attention_group_key(&g.path, insts));
         }
         SortOrder::AZ | SortOrder::ZA => all_roots.sort_by_key(|(_, g, _)| g.name.to_lowercase()),
     }
@@ -434,6 +485,7 @@ pub fn flatten_tree(
         SortOrder::Oldest => ungrouped.sort_by_key(|i| i.created_at),
         SortOrder::Newest => ungrouped.sort_by_key(|i| Reverse(i.created_at)),
         SortOrder::LastActivity => ungrouped.sort_by_key(|i| last_activity_session_key(i)),
+        SortOrder::Attention => ungrouped.sort_by_key(|i| attention_session_key(i)),
         SortOrder::AZ | SortOrder::ZA => sort_by_name(&mut ungrouped, sort_order, |i| &i.title),
     }
 
@@ -456,6 +508,9 @@ pub fn flatten_tree(
         }
         SortOrder::LastActivity => {
             roots_to_iterate.sort_by_key(|g| last_activity_group_key(&g.path, instances));
+        }
+        SortOrder::Attention => {
+            roots_to_iterate.sort_by_key(|g| attention_group_key(&g.path, instances));
         }
         SortOrder::AZ | SortOrder::ZA => {
             sort_by_name(&mut roots_to_iterate, sort_order, |g| &g.name)
@@ -502,6 +557,7 @@ fn flatten_group(
         SortOrder::Oldest => group_sessions.sort_by_key(|i| i.created_at),
         SortOrder::Newest => group_sessions.sort_by_key(|i| Reverse(i.created_at)),
         SortOrder::LastActivity => group_sessions.sort_by_key(|i| last_activity_session_key(i)),
+        SortOrder::Attention => group_sessions.sort_by_key(|i| attention_session_key(i)),
         SortOrder::AZ | SortOrder::ZA => {
             sort_by_name(&mut group_sessions, sort_order, |i| &i.title)
         }
@@ -526,6 +582,9 @@ fn flatten_group(
         }
         SortOrder::LastActivity => {
             children_to_iterate.sort_by_key(|g| last_activity_group_key(&g.path, instances));
+        }
+        SortOrder::Attention => {
+            children_to_iterate.sort_by_key(|g| attention_group_key(&g.path, instances));
         }
         SortOrder::AZ | SortOrder::ZA => {
             sort_by_name(&mut children_to_iterate, sort_order, |g| &g.name)
@@ -898,7 +957,8 @@ mod tests {
 
     #[test]
     fn test_sort_order_cycle() {
-        assert_eq!(SortOrder::Newest.cycle(), SortOrder::LastActivity);
+        assert_eq!(SortOrder::Newest.cycle(), SortOrder::Attention);
+        assert_eq!(SortOrder::Attention.cycle(), SortOrder::LastActivity);
         assert_eq!(SortOrder::LastActivity.cycle(), SortOrder::Oldest);
         assert_eq!(SortOrder::Oldest.cycle(), SortOrder::AZ);
         assert_eq!(SortOrder::AZ.cycle(), SortOrder::ZA);
@@ -911,7 +971,11 @@ mod tests {
         assert_eq!(SortOrder::ZA.cycle_reverse(), SortOrder::AZ);
         assert_eq!(SortOrder::AZ.cycle_reverse(), SortOrder::Oldest);
         assert_eq!(SortOrder::Oldest.cycle_reverse(), SortOrder::LastActivity);
-        assert_eq!(SortOrder::LastActivity.cycle_reverse(), SortOrder::Newest);
+        assert_eq!(
+            SortOrder::LastActivity.cycle_reverse(),
+            SortOrder::Attention
+        );
+        assert_eq!(SortOrder::Attention.cycle_reverse(), SortOrder::Newest);
     }
 
     #[test]
