@@ -40,6 +40,11 @@ pub struct StatusUpdate {
     pub id: String,
     pub status: Status,
     pub last_error: Option<String>,
+    /// Pulled from tmux `#{session_activity}` via
+    /// `update_status_with_metadata`. Carried back so the main thread can
+    /// persist it to the real Instance — the poller mutates a clone, so any
+    /// fields not plumbed through here are dropped on the floor.
+    pub last_accessed_at: Option<chrono::DateTime<chrono::Utc>>,
 }
 
 /// Background thread that polls session status without blocking the UI
@@ -148,6 +153,7 @@ impl StatusPoller {
                                         id: inst.id,
                                         status: Status::Error,
                                         last_error: Some("Container is not running".to_string()),
+                                        last_accessed_at: inst.last_accessed_at,
                                     });
                                 }
                             }
@@ -164,6 +170,7 @@ impl StatusPoller {
                         id: inst.id,
                         status: inst.status,
                         last_error: inst.last_error,
+                        last_accessed_at: inst.last_accessed_at,
                     })
                 })
                 .collect();

@@ -228,12 +228,23 @@ impl HomeView {
             ViewMode::Agent => (theme.border, theme.title),
             ViewMode::Terminal => (theme.terminal_border, theme.terminal_border),
         };
+        // Current sort indicator on the bottom-right of the list block. Uses
+        // ratatui's `title_bottom` so it renders on the existing border and
+        // never intersects row content.
+        let sort_indicator = format!(" sort: {} ", self.sort_order.label());
         let block = Block::default()
             .borders(Borders::TOP | Borders::LEFT | Borders::BOTTOM)
             .border_type(BorderType::Rounded)
             .border_style(Style::default().fg(border_color))
             .title(title)
             .title_style(Style::default().fg(title_color).bold())
+            .title_bottom(
+                Line::from(Span::styled(
+                    sort_indicator,
+                    Style::default().fg(theme.dimmed),
+                ))
+                .right_aligned(),
+            )
             .padding(Padding::horizontal(1));
 
         let inner = block.inner(area);
