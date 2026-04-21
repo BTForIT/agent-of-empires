@@ -521,12 +521,22 @@ impl HomeView {
                         && update.status != Status::Stopped
                 });
 
+                // Always write last_accessed_at — the poller pulls it from
+                // tmux `#{session_activity}`, which is valid signal regardless
+                // of whether we also bump status/last_error this tick. Gating
+                // it behind `should_update` left the field None forever on
+                // sessions that were already stable at Running.
+                let new_last_accessed = update.last_accessed_at;
+
                 if should_update {
                     let new_status = update.status;
                     let new_error = update.last_error;
                     self.mutate_instance(&update.id, |inst| {
                         inst.status = new_status;
                         inst.last_error = new_error;
+                        if new_last_accessed.is_some() {
+                            inst.last_accessed_at = new_last_accessed;
+                        }
                     });
 
                     if let Some(old) = old_status {
@@ -534,6 +544,10 @@ impl HomeView {
                             crate::sound::play_for_transition(old, new_status, &self.sound_config);
                         }
                     }
+                } else if new_last_accessed.is_some() {
+                    self.mutate_instance(&update.id, |inst| {
+                        inst.last_accessed_at = new_last_accessed;
+                    });
                 }
             }
             self.pending_status_refresh = false;
