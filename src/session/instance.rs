@@ -710,6 +710,28 @@ impl Instance {
     /// Update status using pre-fetched pane metadata to avoid per-instance
     /// subprocess spawns. Falls back to subprocess calls if metadata is missing.
     pub fn update_status_with_metadata(&mut self, metadata: Option<&tmux::PaneMetadata>) {
+        let prev_status = self.status;
+        self.update_status_with_metadata_inner(metadata);
+        // Pull last-activity from tmux's `#{session_activity}` (epoch seconds).
+        // This is populated by `tmux::refresh_session_cache()` which runs at
+        // the start of every status-refresh tick. It advances on any pane
+        // output, which is the correct "last messaged" signal. Falls back to
+        // `Utc::now()` on status transitions when the cache didn't carry an
+        // entry (e.g. during session startup before the first cache warm).
+        if let Ok(session) = self.tmux_session() {
+            if let Some(secs) = tmux::get_session_activity_from_cache(session.name()) {
+                if let Some(dt) = DateTime::<Utc>::from_timestamp(secs, 0) {
+                    self.last_accessed_at = Some(dt);
+                    return;
+                }
+            }
+        }
+        if self.status != prev_status {
+            self.last_accessed_at = Some(Utc::now());
+        }
+    }
+
+    fn update_status_with_metadata_inner(&mut self, metadata: Option<&tmux::PaneMetadata>) {
         if matches!(
             self.status,
             Status::Stopped | Status::Deleting | Status::Creating
@@ -983,11 +1005,25 @@ fn format_env_var_prefix(key: &str, value: &str, cmd: &str) -> String {
 /// Uses POSIX-standard `stty susp undef` which works on both Linux and macOS.
 /// Single quotes in `cmd` are escaped with the `'\''` technique to prevent
 /// breaking out of the outer single-quoted wrapper.
+///
+/// The leading `exec` ensures the tmux default shell (which may be fish, nu,
+/// etc.) replaces itself with the POSIX wrapper. Without it, fish stays as the
+/// pane process because fish does not exec the last command in `-c` mode. That
+/// causes `#{pane_current_command}` to report "fish", which triggers a false
+/// restart on reattach. See #757.
 fn wrap_command_ignore_suspend(cmd: &str) -> String {
-    let shell = super::environment::user_posix_shell();
+    let user = super::environment::user_shell();
+    let posix = super::environment::user_posix_shell();
     let escaped = cmd.replace('\'', "'\\''");
     // Use login shell (-l) so version-manager PATHs (NVM, etc.) are available.
-    format!("{} -lc 'stty susp undef; exec env {}'", shell, escaped)
+    // Skip -l when falling back to bash for a non-POSIX user shell (fish, nu,
+    // pwsh): bash's login scripts won't contain the user's PATH setup and -l
+    // may reset the inherited PATH that already has the correct entries.
+    let flag = if user == posix { "-lc" } else { "-c" };
+    format!(
+        "exec {} {} 'stty susp undef; exec env {}'",
+        posix, flag, escaped
+    )
 }
 
 /// Check whether captured pane content indicates a living agent rather than
@@ -1112,6 +1148,90 @@ mod tests {
             "wrapped command should contain the escaped env var assignment: {}",
             wrapped,
         );
+    }
+
+    #[test]
+    #[serial_test::serial(shell_env)]
+    fn test_wrap_command_starts_with_exec() {
+        // All wrapped commands must start with `exec` so that the tmux
+        // default shell (which may be fish/nu) replaces itself with the
+        // POSIX wrapper. Without this, fish stays as the pane process and
+        // #{pane_current_command} reports "fish", triggering false restarts
+        // on reattach. See #757.
+        let original = std::env::var("SHELL").ok();
+        for shell in &["/bin/bash", "/bin/zsh", "/usr/bin/fish", "/usr/bin/nu"] {
+            std::env::set_var("SHELL", shell);
+            let wrapped = wrap_command_ignore_suspend("claude");
+            assert!(
+                wrapped.starts_with("exec "),
+                "SHELL={}: wrapped command must start with 'exec': {}",
+                shell,
+                wrapped,
+            );
+        }
+        match original {
+            Some(v) => std::env::set_var("SHELL", v),
+            None => std::env::remove_var("SHELL"),
+        }
+    }
+
+    #[test]
+    #[serial_test::serial(shell_env)]
+    fn test_wrap_command_posix_shell_uses_login() {
+        let original = std::env::var("SHELL").ok();
+        std::env::set_var("SHELL", "/bin/zsh");
+        let wrapped = wrap_command_ignore_suspend("claude");
+        // POSIX shell: should use -lc for version-manager PATHs
+        assert!(
+            wrapped.contains("-lc"),
+            "POSIX shell should use -lc: {}",
+            wrapped,
+        );
+        match original {
+            Some(v) => std::env::set_var("SHELL", v),
+            None => std::env::remove_var("SHELL"),
+        }
+    }
+
+    #[test]
+    #[serial_test::serial(shell_env)]
+    fn test_wrap_command_fish_skips_login() {
+        let original = std::env::var("SHELL").ok();
+        std::env::set_var("SHELL", "/usr/bin/fish");
+        let wrapped = wrap_command_ignore_suspend("claude");
+        // Fish: should use -c (no -l) because bash's login scripts
+        // won't have fish's PATH setup.
+        assert!(
+            wrapped.starts_with("exec bash -c "),
+            "fish shell should produce 'exec bash -c ...': {}",
+            wrapped,
+        );
+        assert!(
+            !wrapped.contains("-lc"),
+            "fish shell should NOT use -lc: {}",
+            wrapped,
+        );
+        match original {
+            Some(v) => std::env::set_var("SHELL", v),
+            None => std::env::remove_var("SHELL"),
+        }
+    }
+
+    #[test]
+    #[serial_test::serial(shell_env)]
+    fn test_wrap_command_nu_skips_login() {
+        let original = std::env::var("SHELL").ok();
+        std::env::set_var("SHELL", "/usr/bin/nu");
+        let wrapped = wrap_command_ignore_suspend("claude");
+        assert!(
+            wrapped.starts_with("exec bash -c "),
+            "nu shell should produce 'exec bash -c ...': {}",
+            wrapped,
+        );
+        match original {
+            Some(v) => std::env::set_var("SHELL", v),
+            None => std::env::remove_var("SHELL"),
+        }
     }
 
     // Additional tests for is_sandboxed

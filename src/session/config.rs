@@ -56,6 +56,8 @@ pub struct Config {
 pub enum SortOrder {
     #[default]
     Newest,
+    Attention,
+    LastActivity,
     Oldest,
     AZ,
     ZA,
@@ -64,7 +66,9 @@ pub enum SortOrder {
 impl SortOrder {
     pub fn cycle(self) -> Self {
         match self {
-            SortOrder::Newest => SortOrder::Oldest,
+            SortOrder::Newest => SortOrder::Attention,
+            SortOrder::Attention => SortOrder::LastActivity,
+            SortOrder::LastActivity => SortOrder::Oldest,
             SortOrder::Oldest => SortOrder::AZ,
             SortOrder::AZ => SortOrder::ZA,
             SortOrder::ZA => SortOrder::Newest,
@@ -74,7 +78,9 @@ impl SortOrder {
     pub fn cycle_reverse(self) -> Self {
         match self {
             SortOrder::Newest => SortOrder::ZA,
-            SortOrder::Oldest => SortOrder::Newest,
+            SortOrder::Attention => SortOrder::Newest,
+            SortOrder::LastActivity => SortOrder::Attention,
+            SortOrder::Oldest => SortOrder::LastActivity,
             SortOrder::AZ => SortOrder::Oldest,
             SortOrder::ZA => SortOrder::AZ,
         }
@@ -83,6 +89,8 @@ impl SortOrder {
     pub fn label(self) -> &'static str {
         match self {
             SortOrder::Newest => "Newest",
+            SortOrder::Attention => "Attention",
+            SortOrder::LastActivity => "Recent",
             SortOrder::Oldest => "Oldest",
             SortOrder::AZ => "A-Z",
             SortOrder::ZA => "Z-A",
@@ -185,6 +193,8 @@ pub struct SessionConfig {
     /// focus, or stray keystrokes. Navigation keys (h/j/k/l, arrows, Enter, Esc), punctuation
     /// (/, ?), and numeric modifiers stay unshifted. Previously-uppercase bindings
     /// (P, R, T, N, D, G) relocate to Ctrl+letter so nothing is lost.
+    /// Note: Ctrl+D (diff view) may conflict with terminal EOF in some tmux configs;
+    /// if so, rebind tmux's send-prefix or use the `D` key from the help overlay.
     /// Off by default — existing users keep the legacy single-letter UX.
     #[serde(default)]
     pub strict_hotkeys: bool,

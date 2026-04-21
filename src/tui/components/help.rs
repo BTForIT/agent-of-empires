@@ -30,7 +30,7 @@ fn shortcuts(strict: bool) -> Vec<(&'static str, Vec<(&'static str, &'static str
                 ],
             ),
             (
-                "Actions (strict_hotkeys)",
+                "Actions (strict mode)",
                 vec![
                     ("Enter", "Attach to session"),
                     ("Ctrl+T", "Attach to terminal"),
