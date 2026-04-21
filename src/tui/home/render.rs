@@ -853,6 +853,9 @@ impl HomeView {
             Span::styled("│", sep_style),
             Span::styled(if strict { " N" } else { " n" }, key_style),
             Span::styled(" New ", desc_style),
+            Span::styled("│", sep_style),
+            Span::styled(if strict { " B" } else { " b" }, key_style),
+            Span::styled(" Batch ", desc_style),
         ]);
 
         if self.selected_session.is_some() {
