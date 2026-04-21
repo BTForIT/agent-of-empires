@@ -493,7 +493,10 @@ impl App {
                 self.set_theme(&name);
             }
             Action::LaunchCxs => {
-                self.launch_cxs(terminal)?;
+                self.launch_cxs(terminal, false)?;
+            }
+            Action::LaunchCxsSingle => {
+                self.launch_cxs(terminal, true)?;
             }
         }
         Ok(())
@@ -502,11 +505,15 @@ impl App {
     fn launch_cxs(
         &mut self,
         terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>,
+        single: bool,
     ) -> Result<()> {
         let status = self.with_raw_mode_disabled(terminal, || {
-            std::process::Command::new("cxs")
-                .env("CXS_NO_TUI", "1")
-                .status()
+            let mut cmd = std::process::Command::new("cxs");
+            cmd.env("CXS_NO_TUI", "1");
+            if single {
+                cmd.env("CXS_SINGLE", "1");
+            }
+            cmd.status()
         })?;
 
         self.needs_redraw = true;
@@ -773,6 +780,7 @@ pub enum Action {
     StopSession(String),
     SetTheme(String),
     LaunchCxs,
+    LaunchCxsSingle,
 }
 
 #[cfg(test)]
