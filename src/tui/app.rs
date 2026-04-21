@@ -11,7 +11,6 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use super::home::{HomeView, TerminalMode};
-use super::styles::load_theme;
 use super::styles::Theme;
 use crate::session::{get_update_settings, load_config, save_config};
 use crate::tmux::AvailableTools;
@@ -144,7 +143,22 @@ impl App {
     }
 
     pub fn set_theme(&mut self, name: &str) {
-        self.theme = load_theme(name);
+        // Honor the saved color_mode (Palette vs Truecolor). If we don't, a
+        // SetTheme dispatched from the Settings view preview/apply flow will
+        // re-load the theme with raw RGB colors — "breaking the coloration"
+        // on terminals that were working with the user's palette preference
+        // (Termius/mosh edge cases, 8-bit-only TTYs, etc.).
+        let palette_mode = crate::session::resolve_config(
+            self.home.active_profile.as_deref().unwrap_or("default"),
+        )
+        .map(|c| {
+            matches!(
+                c.theme.color_mode,
+                crate::session::config::ColorMode::Palette
+            )
+        })
+        .unwrap_or(false);
+        self.theme = crate::tui::styles::load_theme_with_mode(name, palette_mode);
         self.needs_redraw = true;
     }
 
