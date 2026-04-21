@@ -56,6 +56,7 @@ pub struct Config {
 pub enum SortOrder {
     #[default]
     Newest,
+    Attention,
     LastActivity,
     Oldest,
     AZ,
@@ -65,7 +66,8 @@ pub enum SortOrder {
 impl SortOrder {
     pub fn cycle(self) -> Self {
         match self {
-            SortOrder::Newest => SortOrder::LastActivity,
+            SortOrder::Newest => SortOrder::Attention,
+            SortOrder::Attention => SortOrder::LastActivity,
             SortOrder::LastActivity => SortOrder::Oldest,
             SortOrder::Oldest => SortOrder::AZ,
             SortOrder::AZ => SortOrder::ZA,
@@ -76,7 +78,8 @@ impl SortOrder {
     pub fn cycle_reverse(self) -> Self {
         match self {
             SortOrder::Newest => SortOrder::ZA,
-            SortOrder::LastActivity => SortOrder::Newest,
+            SortOrder::Attention => SortOrder::Newest,
+            SortOrder::LastActivity => SortOrder::Attention,
             SortOrder::Oldest => SortOrder::LastActivity,
             SortOrder::AZ => SortOrder::Oldest,
             SortOrder::ZA => SortOrder::AZ,
@@ -86,6 +89,7 @@ impl SortOrder {
     pub fn label(self) -> &'static str {
         match self {
             SortOrder::Newest => "Newest",
+            SortOrder::Attention => "Attention",
             SortOrder::LastActivity => "Recent",
             SortOrder::Oldest => "Oldest",
             SortOrder::AZ => "A-Z",
