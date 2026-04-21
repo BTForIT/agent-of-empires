@@ -1494,6 +1494,13 @@ impl HomeView {
     }
 
     /// Route a bracketed paste event to the active text input dialog.
+    ///
+    /// In home view with no dialog open, a paste (e.g. VoiceInk dictation
+    /// round-tripped via pasteboard + Cmd-V) would otherwise be silently
+    /// dropped — or worse, if the terminal fails to emit bracketed-paste
+    /// markers, the pasted characters would stream in as KeyEvents and
+    /// trigger destructive home-view shortcuts ('b' spawns cxs, 'q' quits…).
+    /// Capture it into a send_message dialog targeting the selected session.
     pub fn handle_paste(&mut self, text: &str) {
         if let Some(ref mut settings) = self.settings_view {
             settings.handle_paste(text);
@@ -1509,7 +1516,40 @@ impl HomeView {
         }
         if let Some(ref mut dialog) = self.new_dialog {
             dialog.handle_paste(text);
+            return;
         }
+
+        // No dialog open — capture into a send_message dialog if a running
+        // session is selected. Otherwise surface an info dialog so the paste
+        // is never silently dropped on the floor.
+        if let Some(id) = self.selected_session.clone() {
+            if let Some(inst) = self.get_instance(&id) {
+                if inst.status == Status::Creating {
+                    return;
+                }
+                let title = inst.title.clone();
+                let inst_id = inst.id.clone();
+                let tmux_session = crate::tmux::Session::new(&inst_id, &title).ok();
+                let is_running = tmux_session.as_ref().is_some_and(|s| s.exists());
+                if is_running {
+                    self.pending_send_session = Some(id);
+                    let mut dialog = SendMessageDialog::new(&title);
+                    dialog.handle_paste(text);
+                    self.send_message_dialog = Some(dialog);
+                    return;
+                }
+            }
+        }
+
+        self.info_dialog = Some(InfoDialog::new(
+            "Paste captured",
+            &format!(
+                "Received {} characters of pasted text but no running session was \
+                 selected to receive it. Select a session and press 'm' to compose, \
+                 then paste again.",
+                text.chars().count()
+            ),
+        ));
     }
 
     /// Re-score matches after a reload without moving the cursor.
