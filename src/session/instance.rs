@@ -712,6 +712,20 @@ impl Instance {
     pub fn update_status_with_metadata(&mut self, metadata: Option<&tmux::PaneMetadata>) {
         let prev_status = self.status;
         self.update_status_with_metadata_inner(metadata);
+        // Pull last-activity from tmux's `#{session_activity}` (epoch seconds).
+        // This is populated by `tmux::refresh_session_cache()` which runs at
+        // the start of every status-refresh tick. It advances on any pane
+        // output, which is the correct "last messaged" signal. Falls back to
+        // `Utc::now()` on status transitions when the cache didn't carry an
+        // entry (e.g. during session startup before the first cache warm).
+        if let Ok(session) = self.tmux_session() {
+            if let Some(secs) = tmux::get_session_activity_from_cache(session.name()) {
+                if let Some(dt) = DateTime::<Utc>::from_timestamp(secs, 0) {
+                    self.last_accessed_at = Some(dt);
+                    return;
+                }
+            }
+        }
         if self.status != prev_status {
             self.last_accessed_at = Some(Utc::now());
         }
