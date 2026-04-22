@@ -1433,6 +1433,17 @@ impl HomeView {
                     }
                 }
             }
+            // Strict-mode typing guard: any bare lowercase letter that isn't a
+            // navigation key (j/k/h/l) is treated as inadvertent typing — open
+            // the compose dialog pre-filled with that character instead of
+            // firing an action or swallowing the keypress.
+            KeyCode::Char(c)
+                if self.strict_hotkeys
+                    && key.modifiers == KeyModifiers::NONE
+                    && c.is_ascii_lowercase() =>
+            {
+                self.capture_letter_to_compose(c);
+            }
             _ => {}
         }
 
@@ -1586,6 +1597,53 @@ impl HomeView {
                  selected to receive it. Select a session and press 'm' to compose, \
                  then paste again.",
                 text.chars().count()
+            ),
+        ));
+    }
+
+    /// Strict-mode typing guard: a bare lowercase letter was pressed outside
+    /// navigation (j/k/h/l). Treat it as inadvertent typing — open the compose
+    /// dialog for the selected session pre-filled with that character. Mirrors
+    /// handle_paste's dialog-delegation + fallback logic.
+    fn capture_letter_to_compose(&mut self, c: char) {
+        let s = c.to_string();
+        if let Some(ref mut dialog) = self.send_message_dialog {
+            dialog.handle_paste(&s);
+            return;
+        }
+        if let Some(ref mut dialog) = self.new_dialog {
+            dialog.handle_paste(&s);
+            return;
+        }
+        if let Some(ref mut dialog) = self.rename_dialog {
+            dialog.handle_paste(&s);
+            return;
+        }
+
+        if let Some(id) = self.selected_session.clone() {
+            if let Some(inst) = self.get_instance(&id) {
+                if inst.status == Status::Creating {
+                    return;
+                }
+                let title = inst.title.clone();
+                let inst_id = inst.id.clone();
+                let tmux_session = crate::tmux::Session::new(&inst_id, &title).ok();
+                let is_running = tmux_session.as_ref().is_some_and(|s| s.exists());
+                if is_running {
+                    self.pending_send_session = Some(id);
+                    let mut dialog = SendMessageDialog::new(&title);
+                    dialog.handle_paste(&s);
+                    self.send_message_dialog = Some(dialog);
+                    return;
+                }
+            }
+        }
+
+        self.info_dialog = Some(InfoDialog::new(
+            "No session selected",
+            &format!(
+                "Pressed '{c}' but no running session is selected to send to. \
+                 Use arrow keys or j/k to select a session, then type your message."
             ),
         ));
     }
@@ -1806,13 +1864,10 @@ impl HomeView {
                 KeyCode::Char(c.to_ascii_lowercase()),
                 KeyModifiers::NONE,
             )),
-            // Block bare lowercase action letters that would fire without a modifier
-            KeyCode::Char('q' | 'n' | 't' | 'c' | 's' | 'd' | 'x' | 'r' | 'm' | 'o' | 'g')
-                if bare =>
-            {
-                None
-            }
-            // Everything else passes through unchanged (navigation, ?, /, Enter, etc.)
+            // Bare lowercase letters pass through — the main match falls through
+            // to a catch-all that opens the compose dialog pre-filled with the
+            // letter (strict-mode typing-guard). Navigation keys j/k/h/l are
+            // handled by their own arms before the catch-all fires.
             _ => Some(key),
         }
     }
