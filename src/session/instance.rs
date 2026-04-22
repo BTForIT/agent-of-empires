@@ -726,12 +726,14 @@ impl Instance {
 
     /// Update status using pre-fetched pane metadata to avoid per-instance
     /// subprocess spawns. Falls back to subprocess calls if metadata is missing.
+    ///
+    /// Does NOT stamp `last_accessed_at` — that field tracks user-initiated
+    /// activity (see `touch_last_accessed`), which is what the Attention sort
+    /// uses to find sessions that have been ignored longest. Auto-bumping on
+    /// every Idle↔Running flip clusters every session's timestamp around
+    /// startup and kills the aging signal.
     pub fn update_status_with_metadata(&mut self, metadata: Option<&tmux::PaneMetadata>) {
-        let prev_status = self.status;
         self.update_status_with_metadata_inner(metadata);
-        if self.status != prev_status {
-            self.last_accessed_at = Some(Utc::now());
-        }
     }
 
     fn update_status_with_metadata_inner(&mut self, metadata: Option<&tmux::PaneMetadata>) {
