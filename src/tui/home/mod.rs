@@ -1273,6 +1273,23 @@ impl HomeView {
         }
     }
 
+    pub fn sort_order(&self) -> SortOrder {
+        self.sort_order
+    }
+
+    /// Move the cursor to the first session row. Used when returning from an
+    /// attach while sort_order=Attention so the next-highest-attention session
+    /// is already selected — the user doesn't have to scroll up to reach it.
+    pub fn select_top_attention(&mut self) {
+        for (idx, item) in self.flat_items.iter().enumerate() {
+            if let Item::Session { .. } = item {
+                self.cursor = idx;
+                self.update_selected();
+                return;
+            }
+        }
+    }
+
     /// Get the terminal mode for a session (uses config default if not set)
     pub fn get_terminal_mode(&self, session_id: &str) -> TerminalMode {
         self.terminal_modes
