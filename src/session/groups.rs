@@ -497,16 +497,31 @@ fn attention_session_key(
 /// Key used to sort groups by Attention. Uses the highest-priority (lowest
 /// tier) among the group's direct and nested sessions. Empty groups sink.
 ///
+/// Within a tier, the group's aging signal = max(member.last_accessed_at) —
+/// the MOST RECENT activity across any member. The group whose most-recent
+/// activity is itself oldest = the group nobody has touched in the longest
+/// time = the one most likely forgotten. So this sorts ASC (oldest-first),
+/// mirroring the within-tier rule in `attention_session_key`. Groups with
+/// no timestamped members sink after dated ones.
+///
 /// Archive handling: members already short-circuit to tier 99 if archived
 /// (see `attention_tier`). When all members are archived (or the group is
 /// empty AND the group itself is marked archived), the group sorts at
 /// tier 99 with the latest archived_at timestamp (group's own timestamp
-/// is the fallback for empty groups).
+/// is the fallback for empty groups). The archived block stays a recency
+/// view via `Reverse(ts)` — intentional asymmetry with the non-archived
+/// aging rule, same as the session-level key.
+#[allow(clippy::type_complexity)]
 fn attention_group_key(
     path: &str,
     group_archived_at: Option<DateTime<Utc>>,
     instances: &[Instance],
-) -> (u8, bool, Reverse<Option<DateTime<Utc>>>) {
+) -> (
+    u8,
+    bool,
+    Reverse<Option<DateTime<Utc>>>,
+    Option<DateTime<Utc>>,
+) {
     let prefix = format!("{}/", path);
     let members: Vec<&Instance> = instances
         .iter()
@@ -517,9 +532,9 @@ fn attention_group_key(
         // Empty group: if marked archived, sink to tier 99 with the group's
         // own archived_at; otherwise leave at u8::MAX (existing behavior).
         if let Some(ts) = group_archived_at {
-            return (99, false, Reverse(Some(ts)));
+            return (99, false, Reverse(Some(ts)), None);
         }
-        return (u8::MAX, true, Reverse(None));
+        return (u8::MAX, true, Reverse(None), None);
     }
 
     let min_tier = members
@@ -534,11 +549,15 @@ fn attention_group_key(
         // (shouldn't happen given is_archived, but defensive).
         let max_arch = members.iter().filter_map(|i| i.archived_at).max();
         let ts = max_arch.or(group_archived_at);
-        return (99, ts.is_none(), Reverse(ts));
+        return (99, ts.is_none(), Reverse(ts), None);
     }
 
+    // Non-archived: "longest aging" = oldest max(last_accessed_at) first.
+    // The `Reverse` slot is forced to `Reverse(None)` so it doesn't
+    // contribute — the real tiebreak is the trailing ASC field. Shape
+    // mirrors `attention_session_key` so the intent is uniform.
     let max_last = members.iter().filter_map(|i| i.last_accessed_at).max();
-    (min_tier, max_last.is_none(), Reverse(max_last))
+    (min_tier, max_last.is_none(), Reverse(None), max_last)
 }
 
 /// Flatten instances from multiple profiles into a single flat list.
@@ -1441,6 +1460,72 @@ mod tests {
         // Unarchive restores the original tier
         errored.unarchive();
         assert_eq!(attention_tier(&errored), 1);
+    }
+
+    #[test]
+    fn test_attention_sort_within_tier_aging_ascending() {
+        // Longest-aging-first rule: within a single priority tier, the session
+        // whose last_accessed_at is oldest bubbles to the top (the one most
+        // likely to have been forgotten). Untouched (None) rows bucket after
+        // dated ones so a brand-new session doesn't falsely claim top.
+        use chrono::Duration;
+        let now = chrono::Utc::now();
+
+        let mut fresh = Instance::new("fresh", "/tmp/fresh");
+        fresh.status = crate::session::Status::Idle;
+        fresh.last_accessed_at = Some(now - Duration::minutes(5));
+
+        let mut stale = Instance::new("stale", "/tmp/stale");
+        stale.status = crate::session::Status::Idle;
+        stale.last_accessed_at = Some(now - Duration::hours(11));
+
+        let mut middle = Instance::new("middle", "/tmp/middle");
+        middle.status = crate::session::Status::Idle;
+        middle.last_accessed_at = Some(now - Duration::minutes(40));
+
+        let mut untouched = Instance::new("untouched", "/tmp/untouched");
+        untouched.status = crate::session::Status::Idle;
+        untouched.last_accessed_at = None;
+
+        let mut sessions: Vec<&Instance> = vec![&fresh, &middle, &stale, &untouched];
+        sort_sessions(&mut sessions, SortOrder::Attention);
+
+        let titles: Vec<&str> = sessions.iter().map(|i| i.title.as_str()).collect();
+        assert_eq!(
+            titles,
+            vec!["stale", "middle", "fresh", "untouched"],
+            "oldest last_accessed_at should sort first within a tier; None last"
+        );
+    }
+
+    #[test]
+    fn test_attention_group_key_within_tier_aging_ascending() {
+        // Same rule at group level: the group whose most-recent member
+        // activity is oldest ranks first. Mirrors the session-level aging
+        // tiebreak so tree view and flat view stay consistent.
+        use chrono::Duration;
+        let now = chrono::Utc::now();
+
+        let mut fresh_member = Instance::new("f", "/tmp/f");
+        fresh_member.group_path = "fresh".to_string();
+        fresh_member.status = crate::session::Status::Idle;
+        fresh_member.last_accessed_at = Some(now - Duration::minutes(5));
+
+        let mut stale_member = Instance::new("s", "/tmp/s");
+        stale_member.group_path = "stale".to_string();
+        stale_member.status = crate::session::Status::Idle;
+        stale_member.last_accessed_at = Some(now - Duration::hours(11));
+
+        let instances = vec![fresh_member, stale_member];
+        let fresh_key = attention_group_key("fresh", None, &instances);
+        let stale_key = attention_group_key("stale", None, &instances);
+
+        assert!(
+            stale_key < fresh_key,
+            "stale group (11h) should sort before fresh group (5m); got stale={:?} fresh={:?}",
+            stale_key,
+            fresh_key
+        );
     }
 
     #[test]
