@@ -1,5 +1,7 @@
 //! Session operations for HomeView (create, delete, rename)
 
+use chrono::Utc;
+
 use crate::session::builder::{self, InstanceParams};
 use crate::session::{list_profiles, GroupTree, Status, Storage};
 use crate::tui::deletion_poller::DeletionRequest;
@@ -58,6 +60,156 @@ impl HomeView {
 
         self.reload()?;
         Ok(session_id)
+    }
+
+    /// Restart the selected session — stops the current tmux/process and
+    /// starts a fresh one. No-op if no session selected, or if the session
+    /// is currently in a transient state (Creating/Deleting).
+    pub(super) fn restart_selected_session(&mut self) -> anyhow::Result<()> {
+        let id = match &self.selected_session {
+            Some(id) => id.clone(),
+            None => return Ok(()),
+        };
+        // Snapshot what we need; avoid holding a borrow while mutating.
+        let (is_transient, _title) = match self.get_instance(&id) {
+            Some(inst) => (
+                matches!(inst.status, Status::Creating | Status::Deleting),
+                inst.title.clone(),
+            ),
+            None => return Ok(()),
+        };
+        if is_transient {
+            return Ok(());
+        }
+
+        // Mutate the persisted Instance via mutate_instance so storage is
+        // updated atomically. restart_with_size operates on the live tmux
+        // session by id internally — we need to call it on a clone if the
+        // borrow checker fights us.
+        let mut snapshot = match self.get_instance(&id) {
+            Some(inst) => inst.clone(),
+            None => return Ok(()),
+        };
+        snapshot.restart_with_size(crate::terminal::get_size())?;
+
+        // Persist the (possibly updated) status by reflecting it back.
+        self.mutate_instance(&id, |inst| {
+            inst.status = snapshot.status;
+        });
+        self.save()?;
+        Ok(())
+    }
+
+    /// Toggle the archived state of the cursor's selection. Operates on a
+    /// session OR a group. For groups, cascades to all child sessions
+    /// (recursive). Returns Ok(Some(message)) on success with a status-line
+    /// message, Ok(None) if no selection, or Err on failure.
+    ///
+    /// Sort behavior is handled by `attention_tier` (returns 99 for
+    /// archived) — the rendered list will rebuild at the end and sink the
+    /// archived rows to the bottom in italic+dim style.
+    pub(super) fn toggle_archive_at_cursor(&mut self) -> anyhow::Result<Option<String>> {
+        // Session takes precedence over group when both are set (the cursor
+        // line is on a session row).
+        if let Some(id) = self.selected_session.clone() {
+            let mut new_state = false;
+            let mut title = String::new();
+            self.mutate_instance(&id, |inst| {
+                if inst.archived_at.is_some() {
+                    inst.archived_at = None;
+                    new_state = false;
+                } else {
+                    inst.archived_at = Some(Utc::now());
+                    new_state = true;
+                }
+                title = inst.title.clone();
+            });
+            self.save()?;
+            self.flat_items = self.build_flat_items();
+            // Jump cursor to the next attention item after archiving. Without
+            // this, the cursor stays on the same index and lands on whatever
+            // row happened to shift into that slot — effectively random. The
+            // user's workflow is "press z to dismiss → work on the next thing
+            // at top of Attention." Only fire on archive (new_state=true) and
+            // only in Attention sort; unarchive is a deliberate "bring this
+            // back" action where cursor-follows-item makes sense.
+            if new_state && self.sort_order == crate::session::config::SortOrder::Attention {
+                self.select_top_attention(None);
+            }
+            return Ok(Some(format!(
+                "{}: {}",
+                if new_state { "Archived" } else { "Unarchived" },
+                title
+            )));
+        }
+
+        if let Some(group_path) = self.selected_group.clone() {
+            let owning_profile = self.selected_group_profile.clone();
+            // Determine new state from the group itself (or its first member).
+            let currently_archived = if let Some(profile) = &owning_profile {
+                self.group_trees
+                    .get(profile)
+                    .and_then(|t| t.group_archived_at(&group_path))
+                    .is_some()
+            } else {
+                self.group_trees
+                    .values()
+                    .any(|t| t.group_archived_at(&group_path).is_some())
+            };
+            let new_state = !currently_archived;
+            let now = Some(Utc::now());
+
+            // Set on the group tree(s).
+            if let Some(profile) = &owning_profile {
+                if let Some(tree) = self.group_trees.get_mut(profile) {
+                    tree.set_archived(&group_path, new_state);
+                }
+            } else {
+                for tree in self.group_trees.values_mut() {
+                    if tree.group_exists(&group_path) {
+                        tree.set_archived(&group_path, new_state);
+                    }
+                }
+            }
+
+            // Cascade to all child instances (direct + nested).
+            let prefix = format!("{}/", group_path);
+            let ids_to_update: Vec<String> = self
+                .instances
+                .iter()
+                .filter(|i| {
+                    (i.group_path == group_path || i.group_path.starts_with(&prefix))
+                        && owning_profile
+                            .as_ref()
+                            .is_none_or(|p| p == &i.source_profile)
+                })
+                .map(|i| i.id.clone())
+                .collect();
+            for id in &ids_to_update {
+                self.mutate_instance(id, |inst| {
+                    inst.archived_at = if new_state { now } else { None };
+                });
+            }
+
+            self.save()?;
+            self.flat_items = self.build_flat_items();
+            // Same rationale as the session path: after archiving a group,
+            // jump the cursor to the top non-archived attention item so the
+            // user can continue their Attention-view workflow without a
+            // cursor-follows-sunk-folder detour.
+            if new_state && self.sort_order == crate::session::config::SortOrder::Attention {
+                self.select_top_attention(None);
+            }
+            return Ok(Some(format!(
+                "{}: {} ({} session{})",
+                if new_state { "Archived" } else { "Unarchived" },
+                group_path,
+                ids_to_update.len(),
+                if ids_to_update.len() == 1 { "" } else { "s" }
+            )));
+        }
+
+        Ok(None)
     }
 
     pub(super) fn delete_selected(&mut self, options: &DeleteOptions) -> anyhow::Result<()> {

@@ -14,6 +14,8 @@ pub struct Group {
     pub path: String,
     #[serde(default)]
     pub collapsed: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub archived_at: Option<DateTime<Utc>>,
     #[serde(skip)]
     pub children: Vec<Group>,
 }
@@ -24,8 +26,13 @@ impl Group {
             name: name.to_string(),
             path: path.to_string(),
             collapsed: false,
+            archived_at: None,
             children: Vec::new(),
         }
+    }
+
+    pub fn is_archived(&self) -> bool {
+        self.archived_at.is_some()
     }
 }
 
@@ -193,6 +200,32 @@ impl GroupTree {
         }
     }
 
+    /// Toggle the archived state on the group itself. Returns the new
+    /// archived state (true = now archived, false = now unarchived), or
+    /// None if the group does not exist. Note: this does NOT cascade to
+    /// child instances; cascading is the caller's responsibility (see
+    /// HomeView::toggle_archive_at_cursor in operations.rs).
+    pub fn toggle_archived(&mut self, path: &str) -> Option<bool> {
+        let group = self.groups_by_path.get_mut(path)?;
+        if group.archived_at.is_some() {
+            group.archived_at = None;
+            Some(false)
+        } else {
+            group.archived_at = Some(Utc::now());
+            Some(true)
+        }
+    }
+
+    pub fn set_archived(&mut self, path: &str, archived: bool) {
+        if let Some(group) = self.groups_by_path.get_mut(path) {
+            group.archived_at = if archived { Some(Utc::now()) } else { None };
+        }
+    }
+
+    pub fn group_archived_at(&self, path: &str) -> Option<DateTime<Utc>> {
+        self.groups_by_path.get(path).and_then(|g| g.archived_at)
+    }
+
     /// Rename a group and all its descendants to a new path.
     /// If the target path already exists, the old group is merged into it.
     pub fn rename_group(&mut self, old_path: &str, new_path: &str) {
@@ -258,6 +291,10 @@ pub enum Item {
         session_count: usize,
         /// Which profile this group belongs to (set in all-profiles mode)
         profile: Option<String>,
+        /// When the group was archived (None = active). Used by the row
+        /// renderer to apply italic+dim styling. Sort behavior is handled
+        /// upstream in `attention_group_key` based on member archive state.
+        archived_at: Option<DateTime<Utc>>,
     },
     Session {
         id: String,
@@ -297,16 +334,20 @@ fn sort_sessions(sessions: &mut [&Instance], sort_order: SortOrder) {
 }
 
 /// Sort a slice of group references by `sort_order`, using `instances` for
-/// timestamp-based orderings.
-fn sort_groups<T, N, P>(
+/// timestamp-based orderings. The `archived` closure returns the group's
+/// own `archived_at` (only consulted by the Attention sort for empty
+/// archived groups).
+fn sort_groups<T, N, P, A>(
     items: &mut [T],
     sort_order: SortOrder,
     instances: &[Instance],
     name: N,
     path: P,
+    archived: A,
 ) where
     N: Fn(&T) -> &str,
     P: Fn(&T) -> &str,
+    A: Fn(&T) -> Option<DateTime<Utc>>,
 {
     match sort_order {
         SortOrder::Oldest => {
@@ -319,7 +360,7 @@ fn sort_groups<T, N, P>(
             items.sort_by_key(|g| last_activity_group_key(path(g), instances));
         }
         SortOrder::Attention => {
-            items.sort_by_key(|g| attention_group_key(path(g), instances));
+            items.sort_by_key(|g| attention_group_key(path(g), archived(g), instances));
         }
         SortOrder::AZ | SortOrder::ZA => sort_by_name(items, sort_order, name),
     }
@@ -387,48 +428,136 @@ fn last_activity_group_key(
 /// Priority tier for the Attention sort. Lower = higher priority = closer to
 /// the top of the list. See `docs/plans/2026-04-21-aoe-attention-sort.md` for
 /// the full rationale on tier choices.
-fn attention_tier(status: crate::session::Status) -> u8 {
+///
+/// Archived sessions short-circuit to tier 99 so they always sink to the
+/// bottom regardless of their current status. They remain visible (rendered
+/// in italic+dim by the row formatter); only the sort order is suppressed.
+fn attention_tier(inst: &Instance) -> u8 {
+    if inst.is_archived() {
+        return 99;
+    }
     use crate::session::Status::*;
-    match status {
+    match inst.status {
         Waiting => 0,                        // agent paused, needs human input — TOP priority
         Error => 1,                          // something broke, needs intervention
         Idle => 2,                           // turn complete, ready for next prompt
         Unknown => 3,                        // status undetermined, glance warranted
-        Stopped => 4,                        // dormant
-        Running => 5,                        // actively working, leave alone
+        Running => 4,                        // actively working, leave alone
+        Stopped => 5, // dormant — sinks below running so the TUI shows live sessions first
         Starting | Creating | Deleting => 6, // transient, sink to bottom
     }
 }
 
-/// Key used to sort sessions by Attention. Primary = priority tier ascending,
-/// secondary = last_accessed_at descending (so the most recently-bumped
-/// Waiting row is at the top of the Waiting cluster).
-fn attention_session_key(inst: &Instance) -> (u8, bool, Reverse<Option<DateTime<Utc>>>) {
+/// Key used to sort sessions by Attention. Primary = priority tier ascending.
+/// Secondary/tertiary = "longest aging first" — within a tier, the session
+/// that has been ignored the longest bubbles to the top. A Waiting session
+/// that has been sitting untouched for 2 days should rank above one that
+/// was just bumped a minute ago, because the stale one is the one most
+/// likely to have been forgotten.
+///
+/// Sessions with no `last_accessed_at` (never polled / just created) bucket
+/// into the "no activity" slot AFTER the dated ones, so fresh-but-untouched
+/// rows don't falsely claim the top.
+///
+/// Within tier 99 (archived), preserve the reverse convention — most-recently
+/// archived first, since the archive block is a recency view, not an
+/// attention view.
+#[allow(clippy::type_complexity)]
+fn attention_session_key(
+    inst: &Instance,
+) -> (
+    u8,
+    bool,
+    std::cmp::Reverse<Option<DateTime<Utc>>>,
+    Option<DateTime<Utc>>,
+) {
+    let tier = attention_tier(inst);
+    if tier == 99 {
+        // Archived: sort by archived_at desc (most recent first within the block).
+        // `Reverse` on the main key, empty tail for shape parity.
+        return (
+            tier,
+            inst.archived_at.is_none(),
+            Reverse(inst.archived_at),
+            None,
+        );
+    }
+    // Non-archived: "longest aging" = oldest last_accessed_at first (ASC).
+    // The `Reverse` slot is forced to `Reverse(None)` (= sorts after all
+    // Some() in the Reverse ordering) so it doesn't contribute — the real
+    // tiebreak is the trailing ASC field.
     (
-        attention_tier(inst.status),
+        tier,
         inst.last_accessed_at.is_none(),
-        Reverse(inst.last_accessed_at),
+        Reverse(None),
+        inst.last_accessed_at,
     )
 }
 
 /// Key used to sort groups by Attention. Uses the highest-priority (lowest
 /// tier) among the group's direct and nested sessions. Empty groups sink.
+///
+/// Within a tier, the group's aging signal = max(member.last_accessed_at) —
+/// the MOST RECENT activity across any member. The group whose most-recent
+/// activity is itself oldest = the group nobody has touched in the longest
+/// time = the one most likely forgotten. So this sorts ASC (oldest-first),
+/// mirroring the within-tier rule in `attention_session_key`. Groups with
+/// no timestamped members sink after dated ones.
+///
+/// Archive handling: members already short-circuit to tier 99 if archived
+/// (see `attention_tier`). When all members are archived (or the group is
+/// empty AND the group itself is marked archived), the group sorts at
+/// tier 99 with the latest archived_at timestamp (group's own timestamp
+/// is the fallback for empty groups). The archived block stays a recency
+/// view via `Reverse(ts)` — intentional asymmetry with the non-archived
+/// aging rule, same as the session-level key.
+#[allow(clippy::type_complexity)]
 fn attention_group_key(
     path: &str,
+    group_archived_at: Option<DateTime<Utc>>,
     instances: &[Instance],
-) -> (u8, bool, Reverse<Option<DateTime<Utc>>>) {
+) -> (
+    u8,
+    bool,
+    Reverse<Option<DateTime<Utc>>>,
+    Option<DateTime<Utc>>,
+) {
     let prefix = format!("{}/", path);
     let members: Vec<&Instance> = instances
         .iter()
         .filter(|i| i.group_path == path || i.group_path.starts_with(&prefix))
         .collect();
+
+    if members.is_empty() {
+        // Empty group: if marked archived, sink to tier 99 with the group's
+        // own archived_at; otherwise leave at u8::MAX (existing behavior).
+        if let Some(ts) = group_archived_at {
+            return (99, false, Reverse(Some(ts)), None);
+        }
+        return (u8::MAX, true, Reverse(None), None);
+    }
+
     let min_tier = members
         .iter()
-        .map(|i| attention_tier(i.status))
+        .map(|i| attention_tier(i))
         .min()
         .unwrap_or(u8::MAX);
+
+    if min_tier == 99 {
+        // All members archived: sort archived block by latest archived_at.
+        // Falls back to the group's own archived_at if no member has one
+        // (shouldn't happen given is_archived, but defensive).
+        let max_arch = members.iter().filter_map(|i| i.archived_at).max();
+        let ts = max_arch.or(group_archived_at);
+        return (99, ts.is_none(), Reverse(ts), None);
+    }
+
+    // Non-archived: "longest aging" = oldest max(last_accessed_at) first.
+    // The `Reverse` slot is forced to `Reverse(None)` so it doesn't
+    // contribute — the real tiebreak is the trailing ASC field. Shape
+    // mirrors `attention_session_key` so the intent is uniform.
     let max_last = members.iter().filter_map(|i| i.last_accessed_at).max();
-    (min_tier, max_last.is_none(), Reverse(max_last))
+    (min_tier, max_last.is_none(), Reverse(None), max_last)
 }
 
 /// Flatten instances from multiple profiles into a single flat list.
@@ -483,7 +612,8 @@ pub fn flatten_tree_all_profiles(
             all_roots.sort_by_key(|(_, g, insts)| last_activity_group_key(&g.path, insts));
         }
         SortOrder::Attention => {
-            all_roots.sort_by_key(|(_, g, insts)| attention_group_key(&g.path, insts));
+            all_roots
+                .sort_by_key(|(_, g, insts)| attention_group_key(&g.path, g.archived_at, insts));
         }
         SortOrder::AZ | SortOrder::ZA => {
             sort_by_name(&mut all_roots, sort_order, |(_, g, _)| &*g.name)
@@ -535,6 +665,7 @@ pub fn flatten_tree(
         instances,
         |g| &g.name,
         |g| &g.path,
+        |g| g.archived_at,
     );
 
     for root in roots_to_iterate {
@@ -561,6 +692,7 @@ fn flatten_group(
         collapsed: group.collapsed,
         session_count,
         profile: profile.map(|s| s.to_string()),
+        archived_at: group.archived_at,
     });
 
     if group.collapsed {
@@ -590,6 +722,7 @@ fn flatten_group(
         instances,
         |g| &g.name,
         |g| &g.path,
+        |g| g.archived_at,
     );
 
     for child in children_to_iterate {
@@ -1303,5 +1436,231 @@ mod tests {
         tree.rename_group("work", "");
 
         assert!(tree.group_exists("work"));
+    }
+
+    // ─── Archive feature tests ───────────────────────────────────────────
+
+    #[test]
+    fn test_attention_tier_archived_returns_99() {
+        let mut waiting = Instance::new("w", "/tmp/w");
+        waiting.status = crate::session::Status::Waiting;
+        assert_eq!(attention_tier(&waiting), 0);
+
+        // Archive a Waiting session — must short-circuit to 99
+        waiting.archive();
+        assert_eq!(attention_tier(&waiting), 99);
+
+        // Same for Error
+        let mut errored = Instance::new("e", "/tmp/e");
+        errored.status = crate::session::Status::Error;
+        assert_eq!(attention_tier(&errored), 1);
+        errored.archive();
+        assert_eq!(attention_tier(&errored), 99);
+
+        // Unarchive restores the original tier
+        errored.unarchive();
+        assert_eq!(attention_tier(&errored), 1);
+    }
+
+    #[test]
+    fn test_attention_sort_within_tier_aging_ascending() {
+        // Longest-aging-first rule: within a single priority tier, the session
+        // whose last_accessed_at is oldest bubbles to the top (the one most
+        // likely to have been forgotten). Untouched (None) rows bucket after
+        // dated ones so a brand-new session doesn't falsely claim top.
+        use chrono::Duration;
+        let now = chrono::Utc::now();
+
+        let mut fresh = Instance::new("fresh", "/tmp/fresh");
+        fresh.status = crate::session::Status::Idle;
+        fresh.last_accessed_at = Some(now - Duration::minutes(5));
+
+        let mut stale = Instance::new("stale", "/tmp/stale");
+        stale.status = crate::session::Status::Idle;
+        stale.last_accessed_at = Some(now - Duration::hours(11));
+
+        let mut middle = Instance::new("middle", "/tmp/middle");
+        middle.status = crate::session::Status::Idle;
+        middle.last_accessed_at = Some(now - Duration::minutes(40));
+
+        let mut untouched = Instance::new("untouched", "/tmp/untouched");
+        untouched.status = crate::session::Status::Idle;
+        untouched.last_accessed_at = None;
+
+        let mut sessions: Vec<&Instance> = vec![&fresh, &middle, &stale, &untouched];
+        sort_sessions(&mut sessions, SortOrder::Attention);
+
+        let titles: Vec<&str> = sessions.iter().map(|i| i.title.as_str()).collect();
+        assert_eq!(
+            titles,
+            vec!["stale", "middle", "fresh", "untouched"],
+            "oldest last_accessed_at should sort first within a tier; None last"
+        );
+    }
+
+    #[test]
+    fn test_attention_group_key_within_tier_aging_ascending() {
+        // Same rule at group level: the group whose most-recent member
+        // activity is oldest ranks first. Mirrors the session-level aging
+        // tiebreak so tree view and flat view stay consistent.
+        use chrono::Duration;
+        let now = chrono::Utc::now();
+
+        let mut fresh_member = Instance::new("f", "/tmp/f");
+        fresh_member.group_path = "fresh".to_string();
+        fresh_member.status = crate::session::Status::Idle;
+        fresh_member.last_accessed_at = Some(now - Duration::minutes(5));
+
+        let mut stale_member = Instance::new("s", "/tmp/s");
+        stale_member.group_path = "stale".to_string();
+        stale_member.status = crate::session::Status::Idle;
+        stale_member.last_accessed_at = Some(now - Duration::hours(11));
+
+        let instances = vec![fresh_member, stale_member];
+        let fresh_key = attention_group_key("fresh", None, &instances);
+        let stale_key = attention_group_key("stale", None, &instances);
+
+        assert!(
+            stale_key < fresh_key,
+            "stale group (11h) should sort before fresh group (5m); got stale={:?} fresh={:?}",
+            stale_key,
+            fresh_key
+        );
+    }
+
+    #[test]
+    fn test_attention_sort_archived_sinks_to_bottom() {
+        // Build: 1 Waiting, 1 Error, 1 archived (was Waiting), 1 Idle
+        let mut waiting = Instance::new("w", "/tmp/w");
+        waiting.status = crate::session::Status::Waiting;
+        let mut errored = Instance::new("e", "/tmp/e");
+        errored.status = crate::session::Status::Error;
+        let mut archived_waiting = Instance::new("aw", "/tmp/aw");
+        archived_waiting.status = crate::session::Status::Waiting;
+        archived_waiting.archive();
+        let mut idle = Instance::new("i", "/tmp/i");
+        idle.status = crate::session::Status::Idle;
+
+        let mut sessions: Vec<&Instance> = vec![&waiting, &errored, &archived_waiting, &idle];
+        sort_sessions(&mut sessions, SortOrder::Attention);
+
+        // Order should be: Waiting(0), Error(1), Idle(2), Archived(99)
+        let titles: Vec<&str> = sessions.iter().map(|i| i.title.as_str()).collect();
+        assert_eq!(titles, vec!["w", "e", "i", "aw"]);
+    }
+
+    #[test]
+    fn test_group_toggle_archived() {
+        let mut inst = Instance::new("t", "/tmp/t");
+        inst.group_path = "work".to_string();
+        let instances = vec![inst];
+        let mut tree = GroupTree::new_with_groups(&instances, &[]);
+
+        // Initial: not archived
+        assert!(tree.group_archived_at("work").is_none());
+
+        // Toggle on
+        let result = tree.toggle_archived("work");
+        assert_eq!(result, Some(true));
+        assert!(tree.group_archived_at("work").is_some());
+
+        // Toggle off
+        let result = tree.toggle_archived("work");
+        assert_eq!(result, Some(false));
+        assert!(tree.group_archived_at("work").is_none());
+
+        // Nonexistent group returns None
+        assert_eq!(tree.toggle_archived("nope"), None);
+    }
+
+    #[test]
+    fn test_attention_group_key_all_members_archived() {
+        let mut a = Instance::new("a", "/tmp/a");
+        a.group_path = "work".to_string();
+        a.status = crate::session::Status::Waiting; // would be tier 0 if not archived
+        a.archive();
+        let mut b = Instance::new("b", "/tmp/b");
+        b.group_path = "work".to_string();
+        b.status = crate::session::Status::Idle;
+        b.archive();
+
+        let instances = vec![a, b];
+        let key = attention_group_key("work", None, &instances);
+        assert_eq!(key.0, 99, "all-archived group should sort to tier 99");
+    }
+
+    #[test]
+    fn test_attention_group_key_one_active_pulls_group_up() {
+        // Mixed group: 1 archived Waiting, 1 active Idle. Group should sort
+        // at tier 2 (Idle) — the active member pulls it out of the archive
+        // tier. This is the auto-unarchive contract for cascade.
+        let mut archived_waiting = Instance::new("aw", "/tmp/aw");
+        archived_waiting.group_path = "work".to_string();
+        archived_waiting.status = crate::session::Status::Waiting;
+        archived_waiting.archive();
+        let mut active_idle = Instance::new("ai", "/tmp/ai");
+        active_idle.group_path = "work".to_string();
+        active_idle.status = crate::session::Status::Idle;
+
+        let instances = vec![archived_waiting, active_idle];
+        let key = attention_group_key("work", None, &instances);
+        assert_eq!(
+            key.0, 2,
+            "group with one active Idle session should sort at tier 2"
+        );
+    }
+
+    #[test]
+    fn test_attention_group_key_empty_archived_group() {
+        let now = chrono::Utc::now();
+        let key = attention_group_key("empty", Some(now), &[]);
+        assert_eq!(key.0, 99, "empty archived group sinks to tier 99");
+
+        let key_unarchived = attention_group_key("empty", None, &[]);
+        assert_eq!(
+            key_unarchived.0,
+            u8::MAX,
+            "empty unarchived group keeps prior u8::MAX behavior"
+        );
+    }
+
+    #[test]
+    fn test_archived_session_serde_roundtrip() {
+        let mut inst = Instance::new("t", "/tmp/t");
+        inst.archive();
+        let json = serde_json::to_string(&inst).unwrap();
+        assert!(json.contains("archived_at"));
+
+        let parsed: Instance = serde_json::from_str(&json).unwrap();
+        assert!(parsed.is_archived());
+    }
+
+    #[test]
+    fn test_unarchived_session_skips_field_in_json() {
+        // skip_serializing_if = "Option::is_none" means archived_at is
+        // omitted entirely when None. Backward-compatible for existing
+        // sessions.json files.
+        let inst = Instance::new("t", "/tmp/t");
+        let json = serde_json::to_string(&inst).unwrap();
+        assert!(
+            !json.contains("archived_at"),
+            "archived_at should be omitted when None: {}",
+            json
+        );
+    }
+
+    #[test]
+    fn test_legacy_json_without_archived_at_deserializes() {
+        // Existing sessions.json files predate this field. Verify they load
+        // cleanly with archived_at defaulting to None.
+        let legacy = r#"{
+            "id": "abc",
+            "title": "old",
+            "project_path": "/tmp/old",
+            "created_at": "2026-01-01T00:00:00Z"
+        }"#;
+        let inst: Instance = serde_json::from_str(legacy).unwrap();
+        assert!(!inst.is_archived());
+        assert!(inst.archived_at.is_none());
     }
 }
