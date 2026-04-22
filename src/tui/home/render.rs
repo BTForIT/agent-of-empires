@@ -77,7 +77,11 @@ fn format_relative_age(ts: Option<DateTime<Utc>>) -> String {
 
 /// Minimum column width required to render the last-activity column.
 /// When the session list is narrower than this, the column is hidden entirely.
-const LAST_ACTIVITY_MIN_WIDTH: u16 = 50;
+/// 40 matches the lower end of common `home_list_width` settings (e.g. 45 in
+/// this profile's config). Previously 50, which silently dropped the age
+/// column — and with it the visible "aging" signal the Attention sort orders
+/// by — for any pane narrower than that.
+const LAST_ACTIVITY_MIN_WIDTH: u16 = 40;
 
 /// Width reserved for the right-aligned last-activity column:
 /// 5 chars for the label (e.g. `"<1m"`, `"30mo"`) + 1 char left padding.
@@ -383,6 +387,7 @@ impl HomeView {
                 name,
                 collapsed,
                 session_count,
+                archived_at,
                 ..
             } => {
                 let icon = if *collapsed {
@@ -391,7 +396,14 @@ impl HomeView {
                     ICON_EXPANDED
                 };
                 let text = Cow::Owned(format!("{} ({})", name, session_count));
-                let style = Style::default().fg(theme.group).bold();
+                let mut style = Style::default().fg(theme.group).bold();
+                if archived_at.is_some() {
+                    // Archived groups: italic + dim, still visible at the
+                    // bottom of the Attention sort.
+                    style = style
+                        .add_modifier(ratatui::style::Modifier::ITALIC)
+                        .add_modifier(ratatui::style::Modifier::DIM);
+                }
                 (icon, text, style)
             }
             Item::Session { id, .. } => {
@@ -420,7 +432,12 @@ impl HomeView {
                                 Status::Deleting => theme.waiting,
                                 Status::Creating => theme.accent,
                             };
-                            let style = Style::default().fg(color);
+                            let mut style = Style::default().fg(color);
+                            if inst.is_archived() {
+                                style = style
+                                    .add_modifier(ratatui::style::Modifier::ITALIC)
+                                    .add_modifier(ratatui::style::Modifier::DIM);
+                            }
                             (icon, Cow::Owned(inst.title.clone()), style)
                         }
                         ViewMode::Terminal => {
@@ -445,7 +462,12 @@ impl HomeView {
                             } else {
                                 (ICON_IDLE, theme.dimmed)
                             };
-                            let style = Style::default().fg(color);
+                            let mut style = Style::default().fg(color);
+                            if inst.is_archived() {
+                                style = style
+                                    .add_modifier(ratatui::style::Modifier::ITALIC)
+                                    .add_modifier(ratatui::style::Modifier::DIM);
+                            }
                             (icon, Cow::Owned(inst.title.clone()), style)
                         }
                     }
@@ -906,9 +928,11 @@ impl HomeView {
 
         if self.selected_session.is_some() {
             groups.push((3, mk(if strict { "M" } else { "m" }, "Msg")));
+            groups.push((3, mk(if strict { "E" } else { "e" }, "Restart")));
         }
         if !self.flat_items.is_empty() {
             groups.push((3, mk(if strict { "D" } else { "d" }, "Del")));
+            groups.push((3, mk(if strict { "Z" } else { "z" }, "Archive")));
         }
 
         groups.push((4, mk("/", "Search")));

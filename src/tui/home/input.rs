@@ -462,8 +462,18 @@ impl HomeView {
                                         ));
                                     } else {
                                         self.stamp_last_accessed(&session_id);
-                                        if self.sort_order == SortOrder::Attention {
-                                            self.select_top_attention(Some(&session_id));
+                                        self.set_instance_status(
+                                            &session_id,
+                                            crate::session::Status::Running,
+                                        );
+                                        if let Err(e) = self.save() {
+                                            tracing::error!("Failed to save after send: {}", e);
+                                        }
+                                        if self.sort_order
+                                            == crate::session::config::SortOrder::Attention
+                                        {
+                                            self.select_top_attention(None);
+                                            self.selected_session = None;
                                         }
                                     }
                                 }
@@ -575,6 +585,39 @@ impl HomeView {
                     ));
                 } else {
                     return Some(Action::LaunchCxsSingle);
+                }
+            }
+            // `z` / `Z` — toggle archive on the cursor's selection (session
+            // OR group). Mirrors the `a`/`A` non-strict/strict pair pattern.
+            // Archived items sink to the bottom of the Attention sort in
+            // italic+dim; sort behavior lives in `attention_tier`. Cascades
+            // for groups (sets archived_at on all child instances).
+            KeyCode::Char('z') if !self.strict_hotkeys => {
+                if let Err(e) = self.toggle_archive_at_cursor() {
+                    tracing::error!("toggle_archive_at_cursor failed: {}", e);
+                }
+            }
+            KeyCode::Char('Z') if self.strict_hotkeys => {
+                if let Err(e) = self.toggle_archive_at_cursor() {
+                    tracing::error!("toggle_archive_at_cursor failed: {}", e);
+                }
+            }
+            // `e` / `E` — restart the selected session (kill tmux pane and
+            // re-spawn). Mnemonic: rEstart. Mirrors the non-strict/strict
+            // pair pattern. F5 also bound below for muscle memory.
+            KeyCode::Char('e') if !self.strict_hotkeys => {
+                if let Err(e) = self.restart_selected_session() {
+                    tracing::error!("restart_selected_session failed: {}", e);
+                }
+            }
+            KeyCode::Char('E') if self.strict_hotkeys => {
+                if let Err(e) = self.restart_selected_session() {
+                    tracing::error!("restart_selected_session failed: {}", e);
+                }
+            }
+            KeyCode::F(5) => {
+                if let Err(e) = self.restart_selected_session() {
+                    tracing::error!("restart_selected_session failed: {}", e);
                 }
             }
             KeyCode::Char('?') => {
@@ -1356,8 +1399,8 @@ impl HomeView {
                 self.apply_sort_order(self.sort_order.cycle());
             }
             // Shift+O in strict mode arrives here as Char('O') (normalize_strict_key
-            // no longer lowercases 'O' — see line 1858) so it's the one key that
-            // cycles sort in strict mode. Also matches Shift+O in non-strict mode.
+            // no longer lowercases 'O') so it's the one key that cycles sort in
+            // strict mode. Also matches Shift+O in non-strict mode.
             KeyCode::Char('O') => {
                 self.apply_sort_order(self.sort_order.cycle());
             }
