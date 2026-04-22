@@ -462,6 +462,13 @@ impl HomeView {
                                         ));
                                     } else {
                                         self.stamp_last_accessed(&session_id);
+                                        // Persist the bump. Without this, the in-memory
+                                        // aging signal is lost on the next aoe restart —
+                                        // every session reverts to its startup timestamp
+                                        // and the Attention sort tiebreaker collapses.
+                                        if let Err(e) = self.save() {
+                                            tracing::error!("Failed to save after send: {}", e);
+                                        }
                                         // Jump cursor to top of Attention sort after send.
                                         // Without this, the just-messaged session drops to
                                         // tier 5 (running) and sinks below any remaining

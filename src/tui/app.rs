@@ -639,6 +639,13 @@ impl App {
         crate::tmux::refresh_session_cache();
         self.home.reload()?;
         self.home.stamp_last_accessed(session_id);
+        // Persist so the attach-return bump survives aoe restart. Same
+        // reasoning as the send-message path in home/input.rs: without a
+        // save() here the aging signal collapses back to startup timestamps
+        // on next launch.
+        if let Err(e) = self.home.save() {
+            tracing::error!("Failed to save after attach-return: {}", e);
+        }
         // In Attention sort, jump cursor to the top-attention row instead of
         // pinning it to the session we just came from — that session has
         // typically been bumped down a tier (Waiting → Running) and the next
