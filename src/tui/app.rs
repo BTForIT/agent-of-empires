@@ -644,7 +644,7 @@ impl App {
         // typically been bumped down a tier (Waiting → Running) and the next
         // item needing attention is now at row 0.
         if self.home.sort_order() == crate::session::config::SortOrder::Attention {
-            self.home.select_top_attention();
+            self.home.select_top_attention(Some(session_id));
         } else {
             self.home.select_session_by_id(session_id);
         }
@@ -714,7 +714,7 @@ impl App {
         crate::tmux::refresh_session_cache();
         self.home.reload()?;
         if self.home.sort_order() == crate::session::config::SortOrder::Attention {
-            self.home.select_top_attention();
+            self.home.select_top_attention(Some(session_id));
         } else {
             self.home.select_session_by_id(session_id);
         }
