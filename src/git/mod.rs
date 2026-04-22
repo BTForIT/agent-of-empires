@@ -11,6 +11,11 @@ pub mod template;
 use error::{GitError, Result};
 use template::{resolve_template, TemplateVars};
 
+/// Default remote name used for fetch-before-worktree-create.
+/// Hardcoded for now; if multi-remote support is needed (e.g., "upstream"
+/// vs personal fork), this is the place to parameterize.
+const FETCH_REMOTE: &str = "origin";
+
 /// Open a git repository at the given path without searching parent directories.
 /// Unlike `git2::Repository::discover`, this does not walk up the directory tree,
 /// preventing unrelated ancestor repos (e.g., a dotfile-managed home directory)
@@ -244,6 +249,95 @@ impl GitWorktree {
         Some(git_or_bare_dir.to_path_buf())
     }
 
+    /// Fetch a specific branch from a remote. Fails silently on network errors
+    /// or missing remotes (logs a warning), so callers can fall back to local state.
+    /// Stdin is piped to null to prevent SSH passphrase prompts from hanging.
+    /// Times out after 10 seconds.
+    pub fn fetch_branch(&self, remote: &str, branch: &str) -> Result<()> {
+        let mut child = match std::process::Command::new("git")
+            .args(["fetch", remote, branch])
+            .current_dir(&self.repo_path)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+        {
+            Ok(child) => child,
+            Err(e) => {
+                tracing::warn!("git fetch {remote}/{branch} spawn failed: {e}");
+                return Ok(());
+            }
+        };
+
+        let timeout = std::time::Duration::from_secs(10);
+        let start = std::time::Instant::now();
+        let poll_interval = std::time::Duration::from_millis(100);
+
+        loop {
+            match child.try_wait() {
+                Ok(Some(status)) => {
+                    if !status.success() {
+                        if let Some(mut stderr) = child.stderr.take() {
+                            let mut msg = String::new();
+                            let _ = std::io::Read::read_to_string(&mut stderr, &mut msg);
+                            tracing::warn!("git fetch {remote}/{branch} failed: {}", msg.trim());
+                        }
+                    }
+                    return Ok(());
+                }
+                Ok(None) => {
+                    if start.elapsed() > timeout {
+                        let _ = child.kill();
+                        let _ = child.wait();
+                        tracing::warn!(
+                            "git fetch {remote}/{branch} timed out after {}s",
+                            timeout.as_secs()
+                        );
+                        return Ok(());
+                    }
+                    std::thread::sleep(poll_interval);
+                }
+                Err(e) => {
+                    tracing::warn!("git fetch {remote}/{branch} error: {e}");
+                    return Ok(());
+                }
+            }
+        }
+    }
+
+    /// Detect the default branch name by checking local branches and remote
+    /// tracking refs for "main" or "master". Falls back to the first local
+    /// branch if neither exists.
+    pub fn detect_default_branch(&self) -> Result<String> {
+        let repo = open_repo_at(&self.repo_path)?;
+
+        for name in &["main", "master"] {
+            if repo.find_branch(name, git2::BranchType::Local).is_ok() {
+                return Ok(name.to_string());
+            }
+        }
+
+        for name in &["main", "master"] {
+            let remote_ref = format!("{FETCH_REMOTE}/{name}");
+            if repo
+                .find_branch(&remote_ref, git2::BranchType::Remote)
+                .is_ok()
+            {
+                return Ok(name.to_string());
+            }
+        }
+
+        if let Some(Ok((branch, _))) = repo.branches(Some(git2::BranchType::Local))?.next() {
+            if let Ok(Some(name)) = branch.name() {
+                return Ok(name.to_string());
+            }
+        }
+
+        Err(GitError::BranchNotFound(
+            "No default branch found".to_string(),
+        ))
+    }
+
     pub fn create_worktree(&self, branch: &str, path: &Path, create_branch: bool) -> Result<()> {
         if path.exists() {
             return Err(GitError::WorktreeAlreadyExists(path.to_path_buf()));
@@ -253,25 +347,48 @@ impl GitWorktree {
         // previously used by a now-deleted worktree directory.
         self.prune_worktrees()?;
 
+        // Fetch from remote so the worktree starts from the latest state.
+        // For new branches, fetch the default branch (main/master) to use as
+        // the base. For existing branches, fetch that specific branch.
+        // Fails silently on network errors, falling back to local refs.
+        let default_branch = if create_branch {
+            let db = self
+                .detect_default_branch()
+                .unwrap_or_else(|_| "main".to_string());
+            self.fetch_branch(FETCH_REMOTE, &db)?;
+            Some(db)
+        } else {
+            self.fetch_branch(FETCH_REMOTE, branch)?;
+            None
+        };
+
         let repo = open_repo_at(&self.repo_path)?;
 
-        if create_branch {
-            // Find a commit to branch from. Try HEAD first, fall back to any
-            // existing branch. Bare repos often have HEAD pointing to a
-            // non-existent default branch (e.g., HEAD -> master but only main
-            // exists), so the fallback is necessary.
-            let commit_oid = if let Ok(head) = repo.head() {
-                head.peel_to_commit()?.id()
-            } else {
-                repo.branches(Some(git2::BranchType::Local))?
-                    .filter_map(|b| b.ok())
-                    .find_map(|(b, _)| b.get().target())
-                    .ok_or_else(|| {
-                        GitError::WorktreeCommandFailed(
-                            "No commits found to branch from".to_string(),
-                        )
-                    })?
-            };
+        if let Some(default_branch) = default_branch {
+            // Branch from origin/<default> so new branches start from the
+            // latest remote state. Falls back to local HEAD if no remote
+            // exists, then to any local branch (bare repo with broken HEAD).
+            let remote_ref = format!("{FETCH_REMOTE}/{default_branch}");
+            let commit_oid = repo
+                .find_branch(&remote_ref, git2::BranchType::Remote)
+                .ok()
+                .and_then(|b| b.get().target())
+                .or_else(|| {
+                    repo.head()
+                        .ok()
+                        .and_then(|h| h.peel_to_commit().ok())
+                        .map(|c| c.id())
+                })
+                .or_else(|| {
+                    repo.branches(Some(git2::BranchType::Local))
+                        .ok()
+                        .and_then(|mut branches| {
+                            branches.find_map(|b| b.ok().and_then(|(b, _)| b.get().target()))
+                        })
+                })
+                .ok_or_else(|| {
+                    GitError::WorktreeCommandFailed("No commits found to branch from".to_string())
+                })?;
             let commit = repo.find_commit(commit_oid)?;
             repo.branch(branch, &commit, false)?;
         } else {
@@ -1517,5 +1634,164 @@ mod tests {
     #[test]
     fn test_parse_owner_empty_url() {
         assert_eq!(parse_owner_from_remote_url(""), None);
+    }
+
+    // --- detect_default_branch tests ---
+
+    #[test]
+    fn test_detect_default_branch_returns_main() {
+        // setup_test_repo creates a repo with HEAD on main (git2 default)
+        let (dir, _repo) = setup_test_repo();
+        let git_wt = GitWorktree::new(dir.path().to_path_buf()).unwrap();
+        // git2::Repository::init creates an initial branch based on init.defaultBranch
+        // or "master". Either way, it should be detected.
+        let result = git_wt.detect_default_branch().unwrap();
+        assert!(
+            result == "main" || result == "master",
+            "expected main or master, got: {result}"
+        );
+    }
+
+    #[test]
+    fn test_detect_default_branch_finds_master_when_no_main() {
+        let dir = TempDir::new().unwrap();
+        let repo = git2::Repository::init(dir.path()).unwrap();
+
+        // Create a commit on a "master" branch explicitly
+        let sig = git2::Signature::now("Test", "test@example.com").unwrap();
+        let tree_id = repo.index().unwrap().write_tree().unwrap();
+        let tree = repo.find_tree(tree_id).unwrap();
+        repo.commit(Some("refs/heads/master"), &sig, &sig, "init", &tree, &[])
+            .unwrap();
+
+        // If there's also a "main" from init, remove it
+        if let Ok(mut main_branch) = repo.find_branch("main", git2::BranchType::Local) {
+            let _ = main_branch.delete();
+        }
+
+        let git_wt = GitWorktree::new(dir.path().to_path_buf()).unwrap();
+        assert_eq!(git_wt.detect_default_branch().unwrap(), "master");
+    }
+
+    #[test]
+    fn test_detect_default_branch_falls_back_to_first_branch() {
+        let dir = TempDir::new().unwrap();
+        let repo = git2::Repository::init(dir.path()).unwrap();
+
+        let sig = git2::Signature::now("Test", "test@example.com").unwrap();
+        let tree_id = repo.index().unwrap().write_tree().unwrap();
+        let tree = repo.find_tree(tree_id).unwrap();
+        repo.commit(Some("refs/heads/develop"), &sig, &sig, "init", &tree, &[])
+            .unwrap();
+
+        // Remove main and master if they exist
+        if let Ok(mut b) = repo.find_branch("main", git2::BranchType::Local) {
+            let _ = b.delete();
+        }
+        if let Ok(mut b) = repo.find_branch("master", git2::BranchType::Local) {
+            let _ = b.delete();
+        }
+
+        let git_wt = GitWorktree::new(dir.path().to_path_buf()).unwrap();
+        let result = git_wt.detect_default_branch().unwrap();
+        assert_eq!(result, "develop");
+    }
+
+    // --- fetch_branch tests ---
+
+    #[test]
+    fn test_fetch_branch_ok_when_no_remote() {
+        let (dir, _repo) = setup_test_repo();
+        let git_wt = GitWorktree::new(dir.path().to_path_buf()).unwrap();
+        // No remote configured, fetch should return Ok (silent failure)
+        assert!(git_wt.fetch_branch("origin", "main").is_ok());
+    }
+
+    #[test]
+    fn test_fetch_branch_ok_when_branch_missing_on_remote() {
+        let remote_dir = TempDir::new().unwrap();
+        let _remote = git2::Repository::init_bare(remote_dir.path()).unwrap();
+
+        // Clone to get a local repo with an "origin" remote
+        let local_dir = TempDir::new().unwrap();
+        let _local =
+            git2::Repository::clone(remote_dir.path().to_str().unwrap(), local_dir.path()).unwrap();
+
+        let git_wt = GitWorktree::new(local_dir.path().to_path_buf()).unwrap();
+        // Fetching a branch that doesn't exist on the remote should succeed silently
+        assert!(git_wt.fetch_branch("origin", "nonexistent-branch").is_ok());
+    }
+
+    // --- create_worktree fetch integration test ---
+
+    #[test]
+    fn test_create_worktree_branches_from_remote_after_fetch() {
+        // Create a bare "remote" repo with an initial commit on main
+        let remote_dir = TempDir::new().unwrap();
+        let remote = git2::Repository::init_bare(remote_dir.path()).unwrap();
+
+        // Point HEAD at refs/heads/main so clone creates a local "main" branch
+        remote.set_head("refs/heads/main").unwrap();
+
+        let sig = git2::Signature::now("Test", "test@example.com").unwrap();
+        let tree_id = {
+            let blob_oid = remote.blob(b"hello").unwrap();
+            let mut tb = remote.treebuilder(None).unwrap();
+            tb.insert("file.txt", blob_oid, 0o100644).unwrap();
+            tb.write().unwrap()
+        };
+        let tree = remote.find_tree(tree_id).unwrap();
+        let initial_oid = remote
+            .commit(Some("refs/heads/main"), &sig, &sig, "initial", &tree, &[])
+            .unwrap();
+
+        // Clone it locally
+        let local_dir = TempDir::new().unwrap();
+        git2::Repository::clone(remote_dir.path().to_str().unwrap(), local_dir.path()).unwrap();
+
+        // Add a second commit to the remote (local is now 1 commit behind)
+        let blob2 = remote.blob(b"world").unwrap();
+        let mut tb2 = remote.treebuilder(Some(&tree)).unwrap();
+        tb2.insert("file2.txt", blob2, 0o100644).unwrap();
+        let tree2_id = tb2.write().unwrap();
+        let tree2 = remote.find_tree(tree2_id).unwrap();
+        let initial_commit = remote.find_commit(initial_oid).unwrap();
+        let remote_head_oid = remote
+            .commit(
+                Some("refs/heads/main"),
+                &sig,
+                &sig,
+                "second commit",
+                &tree2,
+                &[&initial_commit],
+            )
+            .unwrap();
+
+        // Verify local is behind: local main should still be at initial_oid
+        let local_repo = git2::Repository::open(local_dir.path()).unwrap();
+        let local_main = local_repo
+            .find_branch("main", git2::BranchType::Local)
+            .unwrap();
+        assert_eq!(local_main.get().peel_to_commit().unwrap().id(), initial_oid);
+
+        // Create a new worktree branch via create_worktree
+        let wt_parent = TempDir::new().unwrap();
+        let wt_path = wt_parent.path().join("test-fetch-wt");
+        let git_wt = GitWorktree::new(local_dir.path().to_path_buf()).unwrap();
+        git_wt
+            .create_worktree("new-feature", &wt_path, true)
+            .unwrap();
+
+        // The new branch should be based on the remote's latest commit,
+        // not the stale local HEAD
+        let new_branch = local_repo
+            .find_branch("new-feature", git2::BranchType::Local)
+            .unwrap();
+        let branch_commit_id = new_branch.get().peel_to_commit().unwrap().id();
+        assert_eq!(
+            branch_commit_id, remote_head_oid,
+            "new branch should be based on remote HEAD ({remote_head_oid}), \
+             not stale local HEAD ({initial_oid})"
+        );
     }
 }
