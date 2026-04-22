@@ -108,6 +108,8 @@ pub struct Instance {
     pub created_at: DateTime<Utc>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_accessed_at: Option<DateTime<Utc>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub archived_at: Option<DateTime<Utc>>,
 
     // Git worktree integration
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -167,6 +169,7 @@ impl Instance {
             status: Status::Idle,
             created_at: Utc::now(),
             last_accessed_at: None,
+            archived_at: None,
             worktree_info: None,
             workspace_info: None,
             sandbox_info: None,
@@ -186,6 +189,21 @@ impl Instance {
     /// timestamp reflects actual activity, not just status transitions.
     pub fn touch_last_accessed(&mut self) {
         self.last_accessed_at = Some(Utc::now());
+    }
+
+    /// Mark the session archived. Archived sessions sink to the bottom of
+    /// the Attention sort and render in italic+dim style, but remain
+    /// visible. Auto-cleared by the attention-signal hook on Waiting/Error.
+    pub fn archive(&mut self) {
+        self.archived_at = Some(Utc::now());
+    }
+
+    pub fn unarchive(&mut self) {
+        self.archived_at = None;
+    }
+
+    pub fn is_archived(&self) -> bool {
+        self.archived_at.is_some()
     }
 
     pub fn is_sub_session(&self) -> bool {

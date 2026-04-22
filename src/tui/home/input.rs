@@ -574,6 +574,21 @@ impl HomeView {
                     return Some(Action::LaunchCxsSingle);
                 }
             }
+            // `z` / `Z` — toggle archive on the cursor's selection (session
+            // OR group). Mirrors the `a`/`A` non-strict/strict pair pattern.
+            // Archived items sink to the bottom of the Attention sort in
+            // italic+dim; sort behavior lives in `attention_tier`. Cascades
+            // for groups (sets archived_at on all child instances).
+            KeyCode::Char('z') if !self.strict_hotkeys => {
+                if let Err(e) = self.toggle_archive_at_cursor() {
+                    tracing::error!("toggle_archive_at_cursor failed: {}", e);
+                }
+            }
+            KeyCode::Char('Z') if self.strict_hotkeys => {
+                if let Err(e) = self.toggle_archive_at_cursor() {
+                    tracing::error!("toggle_archive_at_cursor failed: {}", e);
+                }
+            }
             KeyCode::Char('?') => {
                 self.show_help = true;
             }
