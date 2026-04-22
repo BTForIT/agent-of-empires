@@ -740,7 +740,7 @@ fn test_select_top_attention_lands_on_first_session() {
     env.view.update_selected();
     assert_eq!(env.view.cursor, 2);
 
-    env.view.select_top_attention();
+    env.view.select_top_attention(None);
 
     assert_eq!(env.view.cursor, 0);
     if let Item::Session { id, .. } = &env.view.flat_items[0] {
@@ -748,6 +748,57 @@ fn test_select_top_attention_lands_on_first_session() {
     } else {
         panic!("expected first flat_items row to be a Session");
     }
+}
+
+#[test]
+#[serial]
+fn test_select_top_attention_skips_returning_session() {
+    let mut env = create_test_env_with_sessions(3);
+
+    // Grab id of first session (the one we're "returning from").
+    let first_id = if let Item::Session { id, .. } = &env.view.flat_items[0] {
+        id.clone()
+    } else {
+        panic!("expected first flat_items row to be a Session");
+    };
+    let second_id = if let Item::Session { id, .. } = &env.view.flat_items[1] {
+        id.clone()
+    } else {
+        panic!("expected second flat_items row to be a Session");
+    };
+
+    env.view.cursor = 0;
+    env.view.update_selected();
+
+    // Simulate returning from `first_id` — skip it, land on the next session.
+    env.view.select_top_attention(Some(&first_id));
+
+    assert_eq!(env.view.cursor, 1);
+    assert_eq!(
+        env.view.selected_session.as_deref(),
+        Some(second_id.as_str())
+    );
+}
+
+#[test]
+#[serial]
+fn test_select_top_attention_falls_back_to_returning_when_only_session() {
+    let mut env = create_test_env_with_sessions(1);
+
+    let only_id = if let Item::Session { id, .. } = &env.view.flat_items[0] {
+        id.clone()
+    } else {
+        panic!("expected first flat_items row to be a Session");
+    };
+
+    env.view.cursor = 0;
+    env.view.update_selected();
+
+    // Only one session — skip would leave nothing; must fall back to it.
+    env.view.select_top_attention(Some(&only_id));
+
+    assert_eq!(env.view.cursor, 0);
+    assert_eq!(env.view.selected_session.as_deref(), Some(only_id.as_str()));
 }
 
 #[test]

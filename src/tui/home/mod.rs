@@ -1277,16 +1277,29 @@ impl HomeView {
         self.sort_order
     }
 
-    /// Move the cursor to the first session row. Used when returning from an
-    /// attach while sort_order=Attention so the next-highest-attention session
-    /// is already selected — the user doesn't have to scroll up to reach it.
-    pub fn select_top_attention(&mut self) {
+    /// Move the cursor to the highest-priority session row, skipping
+    /// `returning_id` if provided. Used after returning from an attach while
+    /// sort_order=Attention: `stamp_last_accessed` bumps the returning session
+    /// to the top of its tier, so picking row 0 blindly would leave the cursor
+    /// on the session the user just handled. Skip it and land on the next
+    /// session that actually needs attention. Falls back to the returning
+    /// session itself if it's the only one in the list.
+    pub fn select_top_attention(&mut self, returning_id: Option<&str>) {
+        let mut fallback: Option<usize> = None;
         for (idx, item) in self.flat_items.iter().enumerate() {
-            if let Item::Session { .. } = item {
+            if let Item::Session { id, .. } = item {
+                if returning_id.is_some_and(|r| r == id) {
+                    fallback.get_or_insert(idx);
+                    continue;
+                }
                 self.cursor = idx;
                 self.update_selected();
                 return;
             }
+        }
+        if let Some(idx) = fallback {
+            self.cursor = idx;
+            self.update_selected();
         }
     }
 
