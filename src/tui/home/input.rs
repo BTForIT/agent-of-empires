@@ -462,6 +462,22 @@ impl HomeView {
                                         ));
                                     } else {
                                         self.stamp_last_accessed(&session_id);
+                                        // Flip status to Running synchronously so the
+                                        // session jumps to tier 5 NOW instead of drifting
+                                        // at the bottom of its current tier until the
+                                        // next poll cycle (up to ~1s). Without this, a
+                                        // message sent to an Idle session bumps its
+                                        // last_accessed_at but leaves it in tier 2 with
+                                        // the newest timestamp, so the "jump up" cursor
+                                        // move lands on a still-Idle top while the
+                                        // just-sent conversation sinks to the bottom of
+                                        // the Idle block — feels like the jump didn't
+                                        // take. The poller will confirm or correct the
+                                        // status on its next cycle.
+                                        self.set_instance_status(
+                                            &session_id,
+                                            crate::session::Status::Running,
+                                        );
                                         // Persist the bump. Without this, the in-memory
                                         // aging signal is lost on the next aoe restart —
                                         // every session reverts to its startup timestamp
