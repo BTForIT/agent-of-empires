@@ -734,6 +734,24 @@ fn test_select_session_by_id_nonexistent() {
 
 #[test]
 #[serial]
+fn test_select_top_attention_lands_on_first_session() {
+    let mut env = create_test_env_with_sessions(3);
+    env.view.cursor = 2;
+    env.view.update_selected();
+    assert_eq!(env.view.cursor, 2);
+
+    env.view.select_top_attention();
+
+    assert_eq!(env.view.cursor, 0);
+    if let Item::Session { id, .. } = &env.view.flat_items[0] {
+        assert_eq!(env.view.selected_session.as_deref(), Some(id.as_str()));
+    } else {
+        panic!("expected first flat_items row to be a Session");
+    }
+}
+
+#[test]
+#[serial]
 fn test_uppercase_p_opens_profile_picker() {
     let env = create_test_env_empty();
     let mut view = env.view;

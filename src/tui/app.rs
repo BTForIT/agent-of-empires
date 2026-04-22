@@ -639,7 +639,15 @@ impl App {
         crate::tmux::refresh_session_cache();
         self.home.reload()?;
         self.home.stamp_last_accessed(session_id);
-        self.home.select_session_by_id(session_id);
+        // In Attention sort, jump cursor to the top-attention row instead of
+        // pinning it to the session we just came from — that session has
+        // typically been bumped down a tier (Waiting → Running) and the next
+        // item needing attention is now at row 0.
+        if self.home.sort_order() == crate::session::config::SortOrder::Attention {
+            self.home.select_top_attention();
+        } else {
+            self.home.select_session_by_id(session_id);
+        }
 
         if let Err(e) = attach_result {
             tracing::warn!("tmux attach returned error: {}", e);
@@ -705,7 +713,11 @@ impl App {
         self.needs_redraw = true;
         crate::tmux::refresh_session_cache();
         self.home.reload()?;
-        self.home.select_session_by_id(session_id);
+        if self.home.sort_order() == crate::session::config::SortOrder::Attention {
+            self.home.select_top_attention();
+        } else {
+            self.home.select_session_by_id(session_id);
+        }
 
         if let Err(e) = attach_result {
             tracing::warn!("tmux terminal attach returned error: {}", e);
