@@ -589,6 +589,24 @@ impl HomeView {
                     tracing::error!("toggle_archive_at_cursor failed: {}", e);
                 }
             }
+            // `e` / `E` — restart the selected session (kill tmux pane and
+            // re-spawn). Mnemonic: rEstart. Mirrors the non-strict/strict
+            // pair pattern. F5 also bound below for muscle memory.
+            KeyCode::Char('e') if !self.strict_hotkeys => {
+                if let Err(e) = self.restart_selected_session() {
+                    tracing::error!("restart_selected_session failed: {}", e);
+                }
+            }
+            KeyCode::Char('E') if self.strict_hotkeys => {
+                if let Err(e) = self.restart_selected_session() {
+                    tracing::error!("restart_selected_session failed: {}", e);
+                }
+            }
+            KeyCode::F(5) => {
+                if let Err(e) = self.restart_selected_session() {
+                    tracing::error!("restart_selected_session failed: {}", e);
+                }
+            }
             KeyCode::Char('?') => {
                 self.show_help = true;
             }

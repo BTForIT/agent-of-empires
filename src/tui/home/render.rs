@@ -924,9 +924,11 @@ impl HomeView {
 
         if self.selected_session.is_some() {
             groups.push((3, mk(if strict { "M" } else { "m" }, "Msg")));
+            groups.push((3, mk(if strict { "E" } else { "e" }, "Restart")));
         }
         if !self.flat_items.is_empty() {
             groups.push((3, mk(if strict { "D" } else { "d" }, "Del")));
+            groups.push((3, mk(if strict { "Z" } else { "z" }, "Archive")));
         }
 
         groups.push((4, mk("/", "Search")));
