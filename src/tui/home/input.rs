@@ -741,6 +741,21 @@ impl HomeView {
                     tracing::error!("toggle_archive_at_cursor failed: {}", e);
                 }
             }
+            KeyCode::Char('e') if !self.strict_hotkeys => {
+                if let Err(e) = self.restart_selected_session() {
+                    tracing::error!("restart_selected_session failed: {}", e);
+                }
+            }
+            KeyCode::Char('E') if self.strict_hotkeys => {
+                if let Err(e) = self.restart_selected_session() {
+                    tracing::error!("restart_selected_session failed: {}", e);
+                }
+            }
+            KeyCode::F(5) => {
+                if let Err(e) = self.restart_selected_session() {
+                    tracing::error!("restart_selected_session failed: {}", e);
+                }
+            }
             KeyCode::Char('?') => {
                 self.show_help = true;
             }
