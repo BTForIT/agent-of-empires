@@ -1547,6 +1547,40 @@ fn test_o_key_cycles_sort_order_forward() {
 
 #[test]
 #[serial]
+fn test_shift_o_cycles_sort_in_strict_mode() {
+    // Regression guard: normalize_strict_key maps Shift+O → bare 'o'. The main
+    // match must handle 'o' without an `if !self.strict_hotkeys` guard,
+    // otherwise the key falls through to capture_letter_to_compose and opens
+    // the message dialog instead of cycling sort.
+    use crate::session::config::SortOrder;
+
+    let mut env = create_test_env_with_mixed_sessions();
+    env.view.strict_hotkeys = true;
+    assert_eq!(env.view.sort_order, SortOrder::Newest);
+
+    // Shift+O: Char('O') with SHIFT modifier. Normalizer lowercases to 'o',
+    // main match cycles forward.
+    env.view
+        .handle_key(KeyEvent::new(KeyCode::Char('O'), KeyModifiers::SHIFT));
+    assert_eq!(env.view.sort_order, SortOrder::Attention);
+
+    // Some terminals drop the SHIFT modifier and send bare uppercase. Cover
+    // that too.
+    env.view
+        .handle_key(KeyEvent::new(KeyCode::Char('O'), KeyModifiers::NONE));
+    assert_eq!(env.view.sort_order, SortOrder::LastActivity);
+
+    // Ctrl+o must still cycle backward in strict mode.
+    env.view
+        .handle_key(KeyEvent::new(KeyCode::Char('o'), KeyModifiers::CONTROL));
+    assert_eq!(env.view.sort_order, SortOrder::Attention);
+
+    // Sanity: message dialog must NOT have been opened as a side effect.
+    assert!(env.view.send_message_dialog.is_none());
+}
+
+#[test]
+#[serial]
 fn test_ctrl_o_key_cycles_sort_order_backward() {
     use crate::session::config::SortOrder;
 

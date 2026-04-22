@@ -1346,10 +1346,10 @@ impl HomeView {
             KeyCode::Char('o') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                 self.apply_sort_order(self.sort_order.cycle_reverse());
             }
-            KeyCode::Char('o') if !self.strict_hotkeys => {
-                self.apply_sort_order(self.sort_order.cycle());
-            }
-            KeyCode::Char('O') if self.strict_hotkeys => {
+            // In strict mode, normalize_strict_key maps Shift+O → bare 'o' before
+            // reaching this match (see line 1855). So a single lowercase arm
+            // covers both modes — the old `Char('O') if strict` arm was dead code.
+            KeyCode::Char('o') => {
                 self.apply_sort_order(self.sort_order.cycle());
             }
             KeyCode::Up | KeyCode::Char('k') => {
