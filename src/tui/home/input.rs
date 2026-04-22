@@ -473,6 +473,19 @@ impl HomeView {
                                             == crate::session::config::SortOrder::Attention
                                         {
                                             self.select_top_attention(None);
+                                            // CRITICAL: clear selected_session AFTER the
+                                            // select call. reload()/build_flat_items at
+                                            // mod.rs:454-485 remembers prev_selected_session
+                                            // BEFORE rebuild and re-pins the cursor to that
+                                            // session's new position after re-sort — which
+                                            // DRAGS THE CURSOR DOWN WITH the just-sent session
+                                            // as it sinks to the Running tier. Clearing here
+                                            // means reload has no prev to follow, and cursor
+                                            // stays at index 0. The next update_selected()
+                                            // re-syncs selected_session to flat_items[0],
+                                            // which by then is whatever session is actually
+                                            // at the top of the new sort.
+                                            self.selected_session = None;
                                         }
                                     }
                                 }

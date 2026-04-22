@@ -448,21 +448,49 @@ fn attention_tier(inst: &Instance) -> u8 {
     }
 }
 
-/// Key used to sort sessions by Attention. Primary = priority tier ascending,
-/// secondary = last_accessed_at descending (so the most recently-bumped
-/// Waiting row is at the top of the Waiting cluster). Within tier 99
-/// (archived), most-recently-archived items appear at the top of the
-/// archived block.
-fn attention_session_key(inst: &Instance) -> (u8, bool, Reverse<Option<DateTime<Utc>>>) {
+/// Key used to sort sessions by Attention. Primary = priority tier ascending.
+/// Secondary/tertiary = "longest aging first" — within a tier, the session
+/// that has been ignored the longest bubbles to the top. A Waiting session
+/// that has been sitting untouched for 2 days should rank above one that
+/// was just bumped a minute ago, because the stale one is the one most
+/// likely to have been forgotten.
+///
+/// Sessions with no `last_accessed_at` (never polled / just created) bucket
+/// into the "no activity" slot AFTER the dated ones, so fresh-but-untouched
+/// rows don't falsely claim the top.
+///
+/// Within tier 99 (archived), preserve the reverse convention — most-recently
+/// archived first, since the archive block is a recency view, not an
+/// attention view.
+#[allow(clippy::type_complexity)]
+fn attention_session_key(
+    inst: &Instance,
+) -> (
+    u8,
+    bool,
+    std::cmp::Reverse<Option<DateTime<Utc>>>,
+    Option<DateTime<Utc>>,
+) {
     let tier = attention_tier(inst);
     if tier == 99 {
-        // Archived: sort by archived_at desc (most recent first within the block)
-        return (tier, inst.archived_at.is_none(), Reverse(inst.archived_at));
+        // Archived: sort by archived_at desc (most recent first within the block).
+        // `Reverse` on the main key, empty tail for shape parity.
+        return (
+            tier,
+            inst.archived_at.is_none(),
+            Reverse(inst.archived_at),
+            None,
+        );
     }
+    // Non-archived: "longest aging" = oldest last_accessed_at first (ASC).
+    // The `Reverse` slot is forced to `Reverse(None)` (= sorts after all
+    // Some() in the Reverse ordering) so it doesn't contribute — the real
+    // tiebreak is the trailing ASC field.
     (
         tier,
         inst.last_accessed_at.is_none(),
-        Reverse(inst.last_accessed_at),
+        Reverse(None),
+        inst.last_accessed_at,
     )
 }
 
