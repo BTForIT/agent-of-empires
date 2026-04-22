@@ -1650,6 +1650,34 @@ fn test_shift_o_cycles_sort_in_strict_mode() {
 
 #[test]
 #[serial]
+fn test_bare_lowercase_o_does_not_cycle_sort_in_strict_mode() {
+    // Regression guard (2026-04-22): in strict_hotkeys mode, plain lowercase 'o'
+    // MUST NOT cycle sort — it must fall through to the typing-guard catch-all
+    // (message dialog) per the "no destructive lowercase" rule. Only Shift+O
+    // (Char('O')) and Ctrl+O should change sort order in strict mode.
+    //
+    // The previous implementation collapsed the two sort arms into a single
+    // unguarded `Char('o') => cycle`, which fired for bare 'o' too, breaking
+    // the contract and silently changing the user's sort order whenever they
+    // tried to type 'o' as text input.
+    use crate::session::config::SortOrder;
+
+    let mut env = create_test_env_with_mixed_sessions();
+    env.view.strict_hotkeys = true;
+    let initial = env.view.sort_order;
+    assert_eq!(initial, SortOrder::Newest);
+
+    env.view
+        .handle_key(KeyEvent::new(KeyCode::Char('o'), KeyModifiers::NONE));
+
+    assert_eq!(
+        env.view.sort_order, initial,
+        "bare 'o' in strict mode must NOT cycle sort — expected it to stay at Newest"
+    );
+}
+
+#[test]
+#[serial]
 fn test_ctrl_o_key_cycles_sort_order_backward() {
     use crate::session::config::SortOrder;
 
