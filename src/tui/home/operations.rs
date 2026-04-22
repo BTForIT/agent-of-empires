@@ -87,6 +87,32 @@ impl HomeView {
         Ok(session_id)
     }
 
+    pub(super) fn restart_selected_session(&mut self) -> anyhow::Result<()> {
+        let id = match &self.selected_session {
+            Some(id) => id.clone(),
+            None => return Ok(()),
+        };
+        let is_transient = match self.get_instance(&id) {
+            Some(inst) => matches!(inst.status, Status::Creating | Status::Deleting),
+            None => return Ok(()),
+        };
+        if is_transient {
+            return Ok(());
+        }
+
+        let mut snapshot = match self.get_instance(&id) {
+            Some(inst) => inst.clone(),
+            None => return Ok(()),
+        };
+        snapshot.restart_with_size(crate::terminal::get_size())?;
+
+        self.mutate_instance(&id, |inst| {
+            inst.status = snapshot.status;
+        });
+        self.save()?;
+        Ok(())
+    }
+
     pub(super) fn delete_selected(&mut self, options: &DeleteOptions) -> anyhow::Result<()> {
         // Delete-as-archive: if the user didn't tick any destructive box,
         // treat `d` as a UI alias for archive. The session sinks to tier 99,

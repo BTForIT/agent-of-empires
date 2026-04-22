@@ -741,14 +741,6 @@ impl HomeView {
                     tracing::error!("toggle_archive_at_cursor failed: {}", e);
                 }
             }
-            // `f` / `F`: toggle favorite on the cursor's session. Within
-            // the Attention sort, favorited rows pin above non-favorited
-            // peers in the same status tier; a favorited Running stays in
-            // the Running bucket but bubbles above plain Running rows.
-            // Render layer (`render.rs`) adds bold + underline and a
-            // leading `* ` glyph. Favorite survives an unsnooze (positive
-            // care-more signal) but archive clears it (mutex in
-            // `Instance::archive()`).
             KeyCode::Char('f') if !self.strict_hotkeys => {
                 if let Err(e) = self.toggle_favorite_at_cursor() {
                     tracing::error!("toggle_favorite_at_cursor failed: {}", e);
@@ -757,6 +749,21 @@ impl HomeView {
             KeyCode::Char('F') if self.strict_hotkeys => {
                 if let Err(e) = self.toggle_favorite_at_cursor() {
                     tracing::error!("toggle_favorite_at_cursor failed: {}", e);
+                }
+            }
+            KeyCode::Char('e') if !self.strict_hotkeys => {
+                if let Err(e) = self.restart_selected_session() {
+                    tracing::error!("restart_selected_session failed: {}", e);
+                }
+            }
+            KeyCode::Char('E') if self.strict_hotkeys => {
+                if let Err(e) = self.restart_selected_session() {
+                    tracing::error!("restart_selected_session failed: {}", e);
+                }
+            }
+            KeyCode::F(5) => {
+                if let Err(e) = self.restart_selected_session() {
+                    tracing::error!("restart_selected_session failed: {}", e);
                 }
             }
             KeyCode::Char('?') => {
