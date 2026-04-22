@@ -521,11 +521,11 @@ impl HomeView {
                         && update.status != Status::Stopped
                 });
 
-                // Always write last_accessed_at — the poller pulls it from
-                // tmux `#{session_activity}`, which is valid signal regardless
-                // of whether we also bump status/last_error this tick. Gating
-                // it behind `should_update` left the field None forever on
-                // sessions that were already stable at Running.
+                // The poller no longer mutates last_accessed_at (that field
+                // is now user-interaction only), but we still carry the value
+                // back through StatusUpdate so a future change could reintroduce
+                // an automated signal without reshaping the plumbing. Writing
+                // the echoed value is a no-op when unchanged.
                 let new_last_accessed = update.last_accessed_at;
 
                 if should_update {
