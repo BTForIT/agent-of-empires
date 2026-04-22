@@ -1391,10 +1391,16 @@ impl HomeView {
             KeyCode::Char('o') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                 self.apply_sort_order(self.sort_order.cycle_reverse());
             }
-            // In strict mode, normalize_strict_key maps Shift+O → bare 'o' before
-            // reaching this match (see line 1855). So a single lowercase arm
-            // covers both modes — the old `Char('O') if strict` arm was dead code.
-            KeyCode::Char('o') => {
+            // Plain lowercase 'o' cycles sort only OUTSIDE strict mode. In strict
+            // mode, bare 'o' falls through to the typing-guard catch-all (compose
+            // dialog), per the no-destructive-lowercase contract.
+            KeyCode::Char('o') if !self.strict_hotkeys => {
+                self.apply_sort_order(self.sort_order.cycle());
+            }
+            // Shift+O in strict mode arrives here as Char('O') (normalize_strict_key
+            // no longer lowercases 'O') so it's the one key that cycles sort in
+            // strict mode. Also matches Shift+O in non-strict mode.
+            KeyCode::Char('O') => {
                 self.apply_sort_order(self.sort_order.cycle());
             }
             KeyCode::Up | KeyCode::Char('k') => {
@@ -1896,10 +1902,14 @@ impl HomeView {
             KeyCode::Char('o') if ctrl => Some(key),
             // Shifted action letters: map to lowercase equivalents
             // N->n (new), X->x (stop), S->s (settings), M->m (message),
-            // T->t (toggle view), C->c (container toggle), Q->q (quit), O->o (sort)
-            KeyCode::Char(c @ ('N' | 'X' | 'S' | 'M' | 'T' | 'C' | 'Q' | 'O'))
-                if bare || shift_only =>
-            {
+            // T->t (toggle view), C->c (container toggle), Q->q (quit).
+            //
+            // 'O' is INTENTIONALLY excluded: lowercasing Shift+O to 'o' would
+            // collide with bare 'o' (which must fall through to the compose
+            // dialog in strict mode — "no destructive lowercase" rule). Let 'O'
+            // reach the main match as-is so its own `Char('O')` arm can fire
+            // for sort-cycle without ambiguity.
+            KeyCode::Char(c @ ('N' | 'X' | 'S' | 'M' | 'T' | 'C' | 'Q')) if bare || shift_only => {
                 Some(KeyEvent::new(
                     KeyCode::Char(c.to_ascii_lowercase()),
                     KeyModifiers::NONE,
