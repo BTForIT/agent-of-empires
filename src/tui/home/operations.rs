@@ -62,6 +62,44 @@ impl HomeView {
         Ok(session_id)
     }
 
+    /// Restart the selected session — stops the current tmux/process and
+    /// starts a fresh one. No-op if no session selected, or if the session
+    /// is currently in a transient state (Creating/Deleting).
+    pub(super) fn restart_selected_session(&mut self) -> anyhow::Result<()> {
+        let id = match &self.selected_session {
+            Some(id) => id.clone(),
+            None => return Ok(()),
+        };
+        // Snapshot what we need; avoid holding a borrow while mutating.
+        let (is_transient, _title) = match self.get_instance(&id) {
+            Some(inst) => (
+                matches!(inst.status, Status::Creating | Status::Deleting),
+                inst.title.clone(),
+            ),
+            None => return Ok(()),
+        };
+        if is_transient {
+            return Ok(());
+        }
+
+        // Mutate the persisted Instance via mutate_instance so storage is
+        // updated atomically. restart_with_size operates on the live tmux
+        // session by id internally — we need to call it on a clone if the
+        // borrow checker fights us.
+        let mut snapshot = match self.get_instance(&id) {
+            Some(inst) => inst.clone(),
+            None => return Ok(()),
+        };
+        snapshot.restart_with_size(crate::terminal::get_size())?;
+
+        // Persist the (possibly updated) status by reflecting it back.
+        self.mutate_instance(&id, |inst| {
+            inst.status = snapshot.status;
+        });
+        self.save()?;
+        Ok(())
+    }
+
     /// Toggle the archived state of the cursor's selection. Operates on a
     /// session OR a group. For groups, cascades to all child sessions
     /// (recursive). Returns Ok(Some(message)) on success with a status-line
