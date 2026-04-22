@@ -462,6 +462,18 @@ impl HomeView {
                                         ));
                                     } else {
                                         self.stamp_last_accessed(&session_id);
+                                        // Jump cursor to top of Attention sort after send.
+                                        // Without this, the just-messaged session drops to
+                                        // tier 5 (running) and sinks below any remaining
+                                        // waiting/idle siblings, so the cursor "follows it
+                                        // down" and the user loses their place. Only fire
+                                        // in Attention sort — other sorts the user picked
+                                        // deliberately.
+                                        if self.sort_order
+                                            == crate::session::config::SortOrder::Attention
+                                        {
+                                            self.select_top_attention(None);
+                                        }
                                     }
                                 }
                                 Err(e) => {
