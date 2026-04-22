@@ -31,6 +31,13 @@ pub enum SessionCommands {
 
     /// Auto-detect current session
     Current(CurrentArgs),
+
+    /// Archive a session (sinks it to the bottom of the Attention sort,
+    /// rendered in italic+dim; remains visible).
+    Archive(SessionIdArgs),
+
+    /// Unarchive a session (clears archived_at).
+    Unarchive(SessionIdArgs),
 }
 
 #[derive(Args)]
@@ -126,7 +133,37 @@ pub async fn run(profile: &str, command: SessionCommands) -> Result<()> {
         SessionCommands::Capture(args) => capture_session(profile, args).await,
         SessionCommands::Rename(args) => rename_session(profile, args).await,
         SessionCommands::Current(args) => current_session(args).await,
+        SessionCommands::Archive(args) => set_session_archived(profile, args, true).await,
+        SessionCommands::Unarchive(args) => set_session_archived(profile, args, false).await,
     }
+}
+
+async fn set_session_archived(profile: &str, args: SessionIdArgs, archived: bool) -> Result<()> {
+    let storage = Storage::new(profile)?;
+    let (mut instances, groups) = storage.load_with_groups()?;
+
+    let idx = instances
+        .iter()
+        .position(|i| {
+            i.id == args.identifier
+                || i.id.starts_with(&args.identifier)
+                || i.title == args.identifier
+        })
+        .ok_or_else(|| anyhow::anyhow!("Session not found: {}", args.identifier))?;
+
+    if archived {
+        instances[idx].archive();
+    } else {
+        instances[idx].unarchive();
+    }
+    let title = instances[idx].title.clone();
+
+    let group_tree = GroupTree::new_with_groups(&instances, &groups);
+    storage.save_with_groups(&instances, &group_tree)?;
+
+    let verb = if archived { "Archived" } else { "Unarchived" };
+    println!("✓ {} session: {}", verb, title);
+    Ok(())
 }
 
 async fn start_session(profile: &str, args: SessionIdArgs) -> Result<()> {

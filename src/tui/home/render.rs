@@ -383,6 +383,7 @@ impl HomeView {
                 name,
                 collapsed,
                 session_count,
+                archived_at,
                 ..
             } => {
                 let icon = if *collapsed {
@@ -391,7 +392,14 @@ impl HomeView {
                     ICON_EXPANDED
                 };
                 let text = Cow::Owned(format!("{} ({})", name, session_count));
-                let style = Style::default().fg(theme.group).bold();
+                let mut style = Style::default().fg(theme.group).bold();
+                if archived_at.is_some() {
+                    // Archived groups: italic + dim, still visible at the
+                    // bottom of the Attention sort.
+                    style = style
+                        .add_modifier(ratatui::style::Modifier::ITALIC)
+                        .add_modifier(ratatui::style::Modifier::DIM);
+                }
                 (icon, text, style)
             }
             Item::Session { id, .. } => {
@@ -420,7 +428,12 @@ impl HomeView {
                                 Status::Deleting => theme.waiting,
                                 Status::Creating => theme.accent,
                             };
-                            let style = Style::default().fg(color);
+                            let mut style = Style::default().fg(color);
+                            if inst.is_archived() {
+                                style = style
+                                    .add_modifier(ratatui::style::Modifier::ITALIC)
+                                    .add_modifier(ratatui::style::Modifier::DIM);
+                            }
                             (icon, Cow::Owned(inst.title.clone()), style)
                         }
                         ViewMode::Terminal => {
@@ -445,7 +458,12 @@ impl HomeView {
                             } else {
                                 (ICON_IDLE, theme.dimmed)
                             };
-                            let style = Style::default().fg(color);
+                            let mut style = Style::default().fg(color);
+                            if inst.is_archived() {
+                                style = style
+                                    .add_modifier(ratatui::style::Modifier::ITALIC)
+                                    .add_modifier(ratatui::style::Modifier::DIM);
+                            }
                             (icon, Cow::Owned(inst.title.clone()), style)
                         }
                     }
