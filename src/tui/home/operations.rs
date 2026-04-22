@@ -126,6 +126,16 @@ impl HomeView {
             });
             self.save()?;
             self.flat_items = self.build_flat_items();
+            // Jump cursor to the next attention item after archiving. Without
+            // this, the cursor stays on the same index and lands on whatever
+            // row happened to shift into that slot — effectively random. The
+            // user's workflow is "press z to dismiss → work on the next thing
+            // at top of Attention." Only fire on archive (new_state=true) and
+            // only in Attention sort; unarchive is a deliberate "bring this
+            // back" action where cursor-follows-item makes sense.
+            if new_state && self.sort_order == crate::session::config::SortOrder::Attention {
+                self.select_top_attention(None);
+            }
             return Ok(Some(format!(
                 "{}: {}",
                 if new_state { "Archived" } else { "Unarchived" },
@@ -183,6 +193,13 @@ impl HomeView {
 
             self.save()?;
             self.flat_items = self.build_flat_items();
+            // Same rationale as the session path: after archiving a group,
+            // jump the cursor to the top non-archived attention item so the
+            // user can continue their Attention-view workflow without a
+            // cursor-follows-sunk-folder detour.
+            if new_state && self.sort_order == crate::session::config::SortOrder::Attention {
+                self.select_top_attention(None);
+            }
             return Ok(Some(format!(
                 "{}: {} ({} session{})",
                 if new_state { "Archived" } else { "Unarchived" },
