@@ -151,7 +151,7 @@ pub struct AppStateConfig {
 }
 
 /// Session-related configuration defaults
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SessionConfig {
     /// Default coding tool for new sessions (claude, opencode, vibe, codex)
     /// If not set or tool is unavailable, falls back to first available tool
@@ -198,6 +198,48 @@ pub struct SessionConfig {
     /// Off by default — existing users keep the legacy single-letter UX.
     #[serde(default)]
     pub strict_hotkeys: bool,
+
+    /// How long (in minutes) to snooze a session when the user presses
+    /// `w`/`W` or runs `aoe session snooze`. During the snooze window the
+    /// session is treated like archive — sinks to the bottom, renders
+    /// italic+dim with a `z ` prefix, ignored by the attention sort —
+    /// then rejoins the active list automatically when the timer expires.
+    /// Default: 30 minutes.
+    #[serde(default = "default_snooze_duration_minutes")]
+    pub snooze_duration_minutes: u32,
+}
+
+impl Default for SessionConfig {
+    fn default() -> Self {
+        Self {
+            default_tool: None,
+            yolo_mode_default: false,
+            agent_extra_args: HashMap::new(),
+            agent_command_override: HashMap::new(),
+            agent_status_hooks: true,
+            custom_agents: HashMap::new(),
+            agent_detect_as: HashMap::new(),
+            strict_hotkeys: false,
+            snooze_duration_minutes: 30,
+        }
+    }
+}
+
+fn default_snooze_duration_minutes() -> u32 {
+    30
+}
+
+/// Validate a snooze duration in minutes. Accepts 1..=1440 (1 minute to
+/// 24 hours). Values outside this range are rejected by the settings UI
+/// and the CLI `--minutes` flag.
+pub fn validate_snooze_duration(minutes: u64) -> Result<(), String> {
+    if !(1..=1440).contains(&minutes) {
+        return Err(format!(
+            "Snooze duration must be between 1 and 1440 minutes (got {})",
+            minutes
+        ));
+    }
+    Ok(())
 }
 
 impl SessionConfig {
@@ -1203,6 +1245,28 @@ mod tests {
     fn test_resolve_tool_command_returns_empty_for_unknown() {
         let config = SessionConfig::default();
         assert_eq!(config.resolve_tool_command("nonexistent"), "");
+    }
+
+    #[test]
+    fn test_session_config_default_snooze_duration_is_30() {
+        let config = SessionConfig::default();
+        assert_eq!(
+            config.snooze_duration_minutes, 30,
+            "default snooze duration must be 30 minutes"
+        );
+    }
+
+    #[test]
+    fn test_validate_snooze_duration_accepts_valid_range() {
+        assert!(validate_snooze_duration(1).is_ok());
+        assert!(validate_snooze_duration(30).is_ok());
+        assert!(validate_snooze_duration(1440).is_ok());
+    }
+
+    #[test]
+    fn test_validate_snooze_duration_rejects_out_of_range() {
+        assert!(validate_snooze_duration(0).is_err());
+        assert!(validate_snooze_duration(1441).is_err());
     }
 
     #[test]

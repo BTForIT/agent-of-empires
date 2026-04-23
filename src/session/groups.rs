@@ -433,7 +433,11 @@ fn last_activity_group_key(
 /// bottom regardless of their current status. They remain visible (rendered
 /// in italic+dim by the row formatter); only the sort order is suppressed.
 fn attention_tier(inst: &Instance) -> u8 {
-    if inst.is_archived() {
+    if inst.is_archived() || inst.is_snoozed() {
+        // Snoozed shares the archive tier — "temporary archive" semantics.
+        // When the snooze expires, `is_snoozed()` flips to false on the
+        // next render tick and the row rejoins its natural status tier
+        // below.
         return 99;
     }
     use crate::session::Status::*;
@@ -482,15 +486,14 @@ fn attention_session_key(
     // user intent, sunk; favorite is a noop in that state).
     let favorite_bias = tier != 99 && inst.is_favorited() && inst.needs_help();
     if tier == 99 {
-        // Archived: sort by archived_at desc (most recent first within the block).
-        // `Reverse` on the main key, empty tail for shape parity.
-        return (
-            !favorite_bias,
-            tier,
-            inst.archived_at.is_none(),
-            Reverse(inst.archived_at),
-            None,
-        );
+        // Archived + snoozed share tier 99. Secondary sort uses
+        // archived_at when present, else snoozed_until — each sub-block
+        // orders most-recent first (Reverse). Mixed rows interleave by
+        // their active timestamp, which matches "recency view" intent for
+        // both: a just-archived row and a just-snoozed row both belong
+        // near the top of the sunk section.
+        let ts = inst.archived_at.or(inst.snoozed_until);
+        return (!favorite_bias, tier, ts.is_none(), Reverse(ts), None);
     }
     // Non-archived: "longest aging" = oldest last_accessed_at first (ASC).
     // The `Reverse` slot is forced to `Reverse(None)` (= sorts after all
@@ -561,7 +564,7 @@ fn attention_group_key(
     let favorite_bias = min_tier != 99
         && members
             .iter()
-            .any(|i| !i.is_archived() && i.is_favorited() && i.needs_help());
+            .any(|i| !i.is_archived() && !i.is_snoozed() && i.is_favorited() && i.needs_help());
 
     if min_tier == 99 {
         // All members archived: sort archived block by latest archived_at.
@@ -1758,6 +1761,102 @@ mod tests {
             "archived_at should be omitted when None: {}",
             json
         );
+    }
+
+    #[test]
+    fn test_snoozed_session_is_snoozed_while_future() {
+        let mut inst = Instance::new("s", "/tmp/s");
+        inst.snooze(30);
+        assert!(inst.is_snoozed(), "fresh 30m snooze is active");
+        assert!(inst.snooze_remaining().is_some());
+    }
+
+    #[test]
+    fn test_expired_snooze_reports_not_snoozed() {
+        let mut inst = Instance::new("s", "/tmp/s");
+        // Stale past timestamp — the lazy predicate should reject it so
+        // the row rejoins the active Attention sort on next render.
+        inst.snoozed_until = Some(Utc::now() - chrono::Duration::minutes(5));
+        assert!(
+            !inst.is_snoozed(),
+            "past snoozed_until must read as NOT snoozed"
+        );
+        assert!(inst.snooze_remaining().is_none());
+    }
+
+    #[test]
+    fn test_unsnooze_clears_timestamp() {
+        let mut inst = Instance::new("s", "/tmp/s");
+        inst.snooze(30);
+        inst.unsnooze();
+        assert!(!inst.is_snoozed());
+        assert!(inst.snoozed_until.is_none());
+    }
+
+    #[test]
+    fn test_snooze_pushes_to_tier_99() {
+        let mut inst = Instance::new("s", "/tmp/s");
+        inst.status = crate::session::Status::Waiting;
+        assert_eq!(attention_tier(&inst), 0, "baseline: waiting is tier 0");
+        inst.snooze(30);
+        assert_eq!(
+            attention_tier(&inst),
+            99,
+            "snoozed waiting sinks to archive tier"
+        );
+    }
+
+    #[test]
+    fn test_expired_snooze_does_not_hold_tier_99() {
+        let mut inst = Instance::new("s", "/tmp/s");
+        inst.status = crate::session::Status::Waiting;
+        inst.snoozed_until = Some(Utc::now() - chrono::Duration::seconds(1));
+        assert_eq!(
+            attention_tier(&inst),
+            0,
+            "once the timer elapses, tier returns to the natural status bucket"
+        );
+    }
+
+    #[test]
+    fn test_snoozed_session_serde_roundtrip() {
+        let mut inst = Instance::new("s", "/tmp/s");
+        inst.snooze(30);
+        let json = serde_json::to_string(&inst).unwrap();
+        assert!(
+            json.contains("snoozed_until"),
+            "snoozed_until must serialize when set"
+        );
+        let parsed: Instance = serde_json::from_str(&json).unwrap();
+        assert!(
+            parsed.is_snoozed(),
+            "snoozed_until round-trips through JSON"
+        );
+    }
+
+    #[test]
+    fn test_non_snoozed_session_skips_field_in_json() {
+        let inst = Instance::new("s", "/tmp/s");
+        let json = serde_json::to_string(&inst).unwrap();
+        assert!(
+            !json.contains("snoozed_until"),
+            "snoozed_until should be omitted when None: {}",
+            json
+        );
+    }
+
+    #[test]
+    fn test_archive_beats_snooze_on_prefix() {
+        // Precedence rule: archive wins over snooze. Both flags set
+        // together should still honor archive (tier 99 is shared; the
+        // prefix rule is tested in render, but here we just verify the
+        // predicates disagree cleanly).
+        let mut inst = Instance::new("s", "/tmp/s");
+        inst.archive();
+        inst.snooze(30);
+        assert!(inst.is_archived());
+        assert!(inst.is_snoozed());
+        assert_eq!(attention_tier(&inst), 99);
     }
 
     #[test]

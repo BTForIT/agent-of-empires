@@ -75,6 +75,28 @@ fn format_relative_age(ts: Option<DateTime<Utc>>) -> String {
     format!("{}mo", months)
 }
 
+/// Format a remaining snooze duration as a compact countdown string that
+/// fits in the `LAST_ACTIVITY_SLOT` (e.g. `23m`, `1h`, `59m`). Falls back
+/// to `<1m` for sub-minute remainders so the user sees "about to wake"
+/// rather than an empty slot. Days not expected (snooze is capped at 24h
+/// by `validate_snooze_duration`) but formatted defensively.
+fn format_snooze_remaining(delta: chrono::Duration) -> String {
+    let secs = delta.num_seconds();
+    if secs < 60 {
+        return "<1m".to_string();
+    }
+    let mins = secs / 60;
+    if mins < 60 {
+        return format!("{}m", mins);
+    }
+    let hours = mins / 60;
+    if hours < 24 {
+        return format!("{}h", hours);
+    }
+    let days = hours / 24;
+    format!("{}d", days)
+}
+
 /// Minimum column width required to render the last-activity column.
 /// Compared against `inner.width` (list pane minus 2-char border), so this is
 /// effectively `home_list_width - 2`. Must be low enough that a user who set
@@ -438,6 +460,18 @@ impl HomeView {
                                 style = style
                                     .add_modifier(ratatui::style::Modifier::ITALIC)
                                     .add_modifier(ratatui::style::Modifier::DIM);
+                            } else if inst.is_snoozed() {
+                                // Snoozed = "temporary archive": same
+                                // italic+dim style as archive so the row
+                                // visually sinks, plus a `z ` ASCII prefix
+                                // (single-column glyph — mirrors the
+                                // favorite "* " fix that avoided iOS
+                                // emoji wide-width rendering bugs). The
+                                // age column separately shows remaining
+                                // sleep time.
+                                style = style
+                                    .add_modifier(ratatui::style::Modifier::ITALIC)
+                                    .add_modifier(ratatui::style::Modifier::DIM);
                             } else if inst.is_favorited() {
                                 // Favorited, non-archived: bold + underlined
                                 // + "* " prefix. ASCII-only glyph (previously
@@ -450,7 +484,14 @@ impl HomeView {
                                     .add_modifier(ratatui::style::Modifier::BOLD)
                                     .add_modifier(ratatui::style::Modifier::UNDERLINED);
                             }
-                            let title_text = if inst.is_favorited() && !inst.is_archived() {
+                            // Prefix priority: archive (no prefix) wins
+                            // over snooze (`z `) wins over favorite (`* `).
+                            // Matches the sort-tier priority: archive > snooze > favorite.
+                            let title_text = if inst.is_archived() {
+                                Cow::Owned(inst.title.clone())
+                            } else if inst.is_snoozed() {
+                                Cow::Owned(format!("z {}", inst.title))
+                            } else if inst.is_favorited() {
                                 Cow::Owned(format!("* {}", inst.title))
                             } else {
                                 Cow::Owned(inst.title.clone())
@@ -484,6 +525,14 @@ impl HomeView {
                                 style = style
                                     .add_modifier(ratatui::style::Modifier::ITALIC)
                                     .add_modifier(ratatui::style::Modifier::DIM);
+                            } else if inst.is_snoozed() {
+                                // Same visual treatment as the Agent view
+                                // path above — italic+dim + `z ` prefix.
+                                // Style is applied here; prefix lives in
+                                // `title_text` below.
+                                style = style
+                                    .add_modifier(ratatui::style::Modifier::ITALIC)
+                                    .add_modifier(ratatui::style::Modifier::DIM);
                             } else if inst.is_favorited() {
                                 // Favorited, non-archived: bold + underlined
                                 // + "* " prefix. ASCII-only glyph (previously
@@ -496,7 +545,11 @@ impl HomeView {
                                     .add_modifier(ratatui::style::Modifier::BOLD)
                                     .add_modifier(ratatui::style::Modifier::UNDERLINED);
                             }
-                            let title_text = if inst.is_favorited() && !inst.is_archived() {
+                            let title_text = if inst.is_archived() {
+                                Cow::Owned(inst.title.clone())
+                            } else if inst.is_snoozed() {
+                                Cow::Owned(format!("z {}", inst.title))
+                            } else if inst.is_favorited() {
                                 Cow::Owned(format!("* {}", inst.title))
                             } else {
                                 Cow::Owned(inst.title.clone())
@@ -547,7 +600,16 @@ impl HomeView {
                 // before the terminal-mode/status badge. Hidden when the list
                 // pane is too narrow to justify spending the horizontal budget.
                 if list_width >= LAST_ACTIVITY_MIN_WIDTH {
-                    let age = format_relative_age(inst.last_accessed_at);
+                    // Snoozed rows show remaining sleep time instead of
+                    // last-activity age, e.g. "23m" / "1h" / "59m". Gives
+                    // an at-a-glance "wakes back up in X" readout without
+                    // spending a separate column. Falls back to the normal
+                    // last-accessed age for non-snoozed rows.
+                    let age = if let Some(remaining) = inst.snooze_remaining() {
+                        format_snooze_remaining(remaining)
+                    } else {
+                        format_relative_age(inst.last_accessed_at)
+                    };
                     let padded = format!("{:>width$}", age, width = LAST_ACTIVITY_SLOT);
                     line_spans.push(Span::styled(padded, Style::default().fg(theme.dimmed)));
                 }

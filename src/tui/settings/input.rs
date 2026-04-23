@@ -641,6 +641,11 @@ impl SettingsView {
                     s.strict_hotkeys = None;
                 }
             }
+            FieldKey::SnoozeDurationMinutes => {
+                if let Some(ref mut s) = config.session {
+                    s.snooze_duration_minutes = None;
+                }
+            }
             FieldKey::AgentExtraArgs => {
                 if let Some(ref mut s) = config.session {
                     s.agent_extra_args = None;

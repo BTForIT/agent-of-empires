@@ -616,6 +616,25 @@ impl HomeView {
                     tracing::error!("toggle_favorite_at_cursor failed: {}", e);
                 }
             }
+            // `w` / `W` — toggle snooze on the cursor's session. Snooze is
+            // "temporary archive": the row sinks to tier 99 for `config.
+            // session.snooze_duration_minutes` (default 30), renders
+            // italic+dim with a `z ` prefix and remaining-time in the age
+            // column, then rejoins the active Attention sort when the
+            // timer elapses (lazy — `is_snoozed()` just compares against
+            // now). Pressing w/W on a snoozed row wakes it immediately.
+            // Mnemonic: Wait. Separate namespace from archive (`z`/`Z`)
+            // and favorite (`f`/`F`). Session-only for v1.
+            KeyCode::Char('w') if !self.strict_hotkeys => {
+                if let Err(e) = self.toggle_snooze_at_cursor() {
+                    tracing::error!("toggle_snooze_at_cursor failed: {}", e);
+                }
+            }
+            KeyCode::Char('W') if self.strict_hotkeys => {
+                if let Err(e) = self.toggle_snooze_at_cursor() {
+                    tracing::error!("toggle_snooze_at_cursor failed: {}", e);
+                }
+            }
             // `e` / `E` — restart the selected session (kill tmux pane and
             // re-spawn). Mnemonic: rEstart. Mirrors the non-strict/strict
             // pair pattern. F5 also bound below for muscle memory.

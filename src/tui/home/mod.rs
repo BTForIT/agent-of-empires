@@ -220,6 +220,12 @@ pub struct HomeView {
     // dictation / stray keystrokes triggering destructive actions).
     pub(super) strict_hotkeys: bool,
 
+    // Snooze duration applied when the user toggles snooze on a session.
+    // Snapshotted from `config.session.snooze_duration_minutes` at load/
+    // settings-reload time (same pattern as `strict_hotkeys`) so the hot
+    // path doesn't re-resolve the full config on every keypress.
+    pub(super) snooze_duration_minutes: u32,
+
     // Settings view
     pub(super) settings_view: Option<SettingsView>,
     /// Flag to indicate we're confirming settings close (unsaved changes)
@@ -283,6 +289,10 @@ impl HomeView {
             .as_ref()
             .map(|config| config.session.strict_hotkeys)
             .unwrap_or(false);
+        let snooze_duration_minutes = resolved
+            .as_ref()
+            .map(|config| config.session.snooze_duration_minutes)
+            .unwrap_or(30);
         let user_config = load_config().ok().flatten();
         let sort_order = user_config
             .as_ref()
@@ -362,6 +372,7 @@ impl HomeView {
             default_terminal_mode,
             sound_config,
             strict_hotkeys,
+            snooze_duration_minutes,
             settings_view: None,
             settings_close_confirm: false,
             diff_view: None,
@@ -1327,6 +1338,9 @@ impl HomeView {
 
             // Refresh strict-hotkeys mode
             self.strict_hotkeys = config.session.strict_hotkeys;
+
+            // Refresh snooze duration
+            self.snooze_duration_minutes = config.session.snooze_duration_minutes;
         }
     }
 
