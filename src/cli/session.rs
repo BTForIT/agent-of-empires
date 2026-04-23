@@ -4,7 +4,24 @@ use anyhow::{bail, Result};
 use clap::{Args, Subcommand};
 use serde::Serialize;
 
-use crate::session::{GroupTree, Storage};
+use crate::session::{GroupTree, Instance, Storage};
+
+/// Refuse to act on archived sessions. Used by `restart` to honor the
+/// "archived = sunk; do not touch without explicit unarchive" invariant.
+/// Data-proven failure mode: without this guard, cx account-swap teardown
+/// and aoe-restart-all.sh both iterate every live tmux session and call
+/// `aoe session restart $title` for each — archived sessions were being
+/// restarted (and sent a wake-up prompt) despite the user sinking them.
+fn ensure_not_archived(inst: &Instance, identifier: &str) -> Result<()> {
+    if inst.archived_at.is_some() {
+        bail!(
+            "Session '{}' is archived — refusing to restart. Run `aoe session unarchive {}` first.",
+            inst.title,
+            identifier
+        );
+    }
+    Ok(())
+}
 
 #[derive(Subcommand)]
 pub enum SessionCommands {
@@ -238,6 +255,8 @@ async fn restart_session(profile: &str, args: SessionIdArgs) -> Result<()> {
                 || i.title == args.identifier
         })
         .ok_or_else(|| anyhow::anyhow!("Session not found: {}", args.identifier))?;
+
+    ensure_not_archived(&instances[idx], &args.identifier)?;
 
     instances[idx].restart_with_size(crate::terminal::get_size())?;
     let title = instances[idx].title.clone();
@@ -533,4 +552,37 @@ async fn current_session(args: CurrentArgs) -> Result<()> {
     }
 
     bail!("Current tmux session is not an Agent of Empires session")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ensure_not_archived_allows_live_session() {
+        let inst = Instance::new("forit-Avatics", "/tmp/x");
+        assert!(ensure_not_archived(&inst, "forit-Avatics").is_ok());
+    }
+
+    #[test]
+    fn ensure_not_archived_refuses_archived_session() {
+        let mut inst = Instance::new("forit-Avatics", "/tmp/x");
+        inst.archive();
+        let err = ensure_not_archived(&inst, "forit-Avatics").unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("archived"), "expected 'archived' in: {msg}");
+        assert!(msg.contains("forit-Avatics"), "expected title in: {msg}");
+        assert!(
+            msg.contains("unarchive"),
+            "expected recovery hint in: {msg}"
+        );
+    }
+
+    #[test]
+    fn ensure_not_archived_allows_after_unarchive() {
+        let mut inst = Instance::new("forit-Avatics", "/tmp/x");
+        inst.archive();
+        inst.unarchive();
+        assert!(ensure_not_archived(&inst, "forit-Avatics").is_ok());
+    }
 }
