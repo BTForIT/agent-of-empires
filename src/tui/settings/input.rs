@@ -293,8 +293,18 @@ impl SettingsView {
                     && !self.fields.is_empty()
                 {
                     let was_theme = self.fields[self.selected_field].key == FieldKey::ThemeName;
+                    // Clearing an override doesn't change which fields exist, only
+                    // their inherited values. rebuild_fields() resets scroll to 0,
+                    // which would yank the user away from the field they just reset.
+                    // Preserve the cursor and scroll position.
+                    let saved_selected = self.selected_field;
+                    let saved_scroll = self.fields_scroll_offset;
                     self.clear_profile_override(self.selected_field);
                     self.rebuild_fields();
+                    if saved_selected < self.fields.len() {
+                        self.selected_field = saved_selected;
+                    }
+                    self.fields_scroll_offset = saved_scroll;
 
                     if was_theme {
                         if let Some(field) =
