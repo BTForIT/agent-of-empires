@@ -2,7 +2,7 @@ import { memo, useCallback, useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import type { Workspace, RepoGroup, SessionStatus } from "../lib/types";
 import { STATUS_DOT_CLASS, STATUS_TEXT_CLASS, isSessionActive } from "../lib/session";
-import { renameSession, setSessionNotifications } from "../lib/api";
+import { renameSession, setSessionNotifications, setSessionAttention } from "../lib/api";
 import { StatusGlyph } from "./StatusGlyph";
 import { OwnerAvatar } from "./OwnerAvatar";
 
@@ -63,6 +63,24 @@ function detectNotifyPreset(
   return "default";
 }
 
+/** Mirror of the TUI's attention-overlay precedence for the sidebar row.
+ *  archive > snooze > favorite > default. Snooze is active only while
+ *  `snoozed_until` is in the future — a stale past timestamp falls
+ *  through (matches the server's `is_snoozed()` lazy predicate). */
+type AttentionState = "archived" | "snoozed" | "favorited" | "default";
+function attentionState(session: {
+  archived_at: string | null;
+  favorited_at: string | null;
+  snoozed_until: string | null;
+}): AttentionState {
+  if (session.archived_at) return "archived";
+  if (session.snoozed_until && Date.parse(session.snoozed_until) > Date.now()) {
+    return "snoozed";
+  }
+  if (session.favorited_at) return "favorited";
+  return "default";
+}
+
 function loadSavedWidth(): number {
   try {
     const saved = localStorage.getItem(SIDEBAR_WIDTH_KEY);
@@ -103,11 +121,31 @@ const SessionRow = memo(function SessionRow({
     firstSession?.notify_on_idle,
     firstSession?.notify_on_error,
   );
+  const attention: AttentionState = firstSession
+    ? attentionState(firstSession)
+    : "default";
 
   const setNotifyPreset = async (preset: NotifyPreset) => {
     setContextMenu(null);
     if (!sessionId || preset === notifyPreset) return;
     await setSessionNotifications(sessionId, preset);
+  };
+
+  /** Toggle an attention overlay. Same primitive used for all three
+   *  flags; the close-menu side-effect is unconditional so the
+   *  sidebar doesn't hang open on network slowness. */
+  const toggleAttention = async (
+    action:
+      | "archive"
+      | "unarchive"
+      | "favorite"
+      | "unfavorite"
+      | "snooze"
+      | "unsnooze",
+  ) => {
+    setContextMenu(null);
+    if (!sessionId) return;
+    await setSessionAttention(sessionId, action);
   };
 
   const [contextMenu, setContextMenu] = useState<{ x: number; y: number } | null>(null);
@@ -256,7 +294,31 @@ const SessionRow = memo(function SessionRow({
           >
             <StatusGlyph status={sessionStatus} createdAt={createdAt} />
           </span>
-          <span className={`text-[13px] md:text-[14px] truncate flex-1 ${isSessionActive(sessionStatus) ? textClass : isActive ? "text-text-primary" : "text-text-secondary"}`} title={label}>
+          <span
+            className={`text-[13px] md:text-[14px] truncate flex-1 ${
+              isSessionActive(sessionStatus)
+                ? textClass
+                : isActive
+                  ? "text-text-primary"
+                  : "text-text-secondary"
+            } ${
+              attention === "archived" || attention === "snoozed"
+                ? "italic opacity-60"
+                : attention === "favorited"
+                  ? "font-bold underline"
+                  : ""
+            }`}
+            title={label}
+          >
+            {/* Mirror the TUI's ASCII prefixes — `z ` for snooze,
+               `* ` for favorite, no prefix for archive (archive's
+               italic+dim carries the signal on its own). Precedence:
+               archive > snooze > favorite > default. */}
+            {attention === "snoozed"
+              ? "z "
+              : attention === "favorited"
+                ? "* "
+                : ""}
             {label}
           </span>
         </div>
@@ -272,6 +334,41 @@ const SessionRow = memo(function SessionRow({
             className="w-full text-left px-3 py-2 md:py-2 max-md:py-3 text-sm text-text-secondary hover:bg-surface-700/50 cursor-pointer transition-colors"
           >
             Rename
+          </button>
+          <div className="border-t border-surface-700/20 my-1" />
+          {/* Attention overlay toggles — mirror the TUI `z`/`f`/`w`
+             keybinds. Label flips to the inverse action when a flag
+             is already set (an archived session gets "Unarchive"
+             instead of "Archive"). */}
+          <button
+            onClick={() =>
+              void toggleAttention(
+                attention === "favorited" ? "unfavorite" : "favorite",
+              )
+            }
+            className="w-full text-left px-3 py-2 md:py-2 max-md:py-3 text-sm text-text-secondary hover:bg-surface-700/50 cursor-pointer transition-colors"
+          >
+            {attention === "favorited" ? "Unfavorite" : "Favorite"}
+          </button>
+          <button
+            onClick={() =>
+              void toggleAttention(
+                attention === "snoozed" ? "unsnooze" : "snooze",
+              )
+            }
+            className="w-full text-left px-3 py-2 md:py-2 max-md:py-3 text-sm text-text-secondary hover:bg-surface-700/50 cursor-pointer transition-colors"
+          >
+            {attention === "snoozed" ? "Wake" : "Snooze"}
+          </button>
+          <button
+            onClick={() =>
+              void toggleAttention(
+                attention === "archived" ? "unarchive" : "archive",
+              )
+            }
+            className="w-full text-left px-3 py-2 md:py-2 max-md:py-3 text-sm text-text-secondary hover:bg-surface-700/50 cursor-pointer transition-colors"
+          >
+            {attention === "archived" ? "Unarchive" : "Archive"}
           </button>
           <div className="border-t border-surface-700/20 my-1" />
           <div className="px-3 py-1 text-[11px] font-mono uppercase tracking-widest text-text-muted">

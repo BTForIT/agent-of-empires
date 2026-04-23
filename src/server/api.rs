@@ -64,6 +64,18 @@ pub struct SessionResponse {
     pub notify_on_waiting: Option<bool>,
     pub notify_on_idle: Option<bool>,
     pub notify_on_error: Option<bool>,
+
+    /// Attention-sort overlay flags, as RFC3339 timestamps when set.
+    /// Each is null unless the user explicitly set that state via the
+    /// TUI keybind (z/f/w), the CLI (`aoe session archive|favorite|
+    /// snooze`), or this endpoint. `snoozed_until` is a future time
+    /// during an active snooze; it stays on disk (stale) after expiry
+    /// until the next mutation rewrites the session — the frontend
+    /// should compare against `Date.now()` before assuming it's still
+    /// snoozed.
+    pub archived_at: Option<String>,
+    pub favorited_at: Option<String>,
+    pub snoozed_until: Option<String>,
 }
 
 #[derive(Serialize, Clone)]
@@ -107,6 +119,9 @@ impl From<&Instance> for SessionResponse {
             notify_on_waiting: inst.notify_on_waiting,
             notify_on_idle: inst.notify_on_idle,
             notify_on_error: inst.notify_on_error,
+            archived_at: inst.archived_at.map(|t| t.to_rfc3339()),
+            favorited_at: inst.favorited_at.map(|t| t.to_rfc3339()),
+            snoozed_until: inst.snoozed_until.map(|t| t.to_rfc3339()),
         }
     }
 }
@@ -345,6 +360,85 @@ pub async fn update_session_notifications(
             .collect();
         if let Err(e) = storage.save(&profile_instances) {
             tracing::error!("Failed to save after notification update: {e}");
+        }
+    }
+
+    (StatusCode::OK, Json(serde_json::json!(response)))
+}
+
+// --- Update attention overlay (archive / favorite / snooze) ---
+
+/// Body for `PATCH /api/sessions/:id/attention`. `action` names the
+/// primitive and direction; `minutes` is honored only for `snooze`
+/// (optional override — defaults to the profile's configured
+/// `session.snooze_duration_minutes`).
+#[derive(Deserialize)]
+pub struct AttentionBody {
+    pub action: String,
+    #[serde(default)]
+    pub minutes: Option<u64>,
+}
+
+pub async fn update_session_attention(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    Json(body): Json<AttentionBody>,
+) -> impl IntoResponse {
+    let mut instances = state.instances.write().await;
+    let Some(inst) = instances.iter_mut().find(|i| i.id == id) else {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({ "message": "Session not found" })),
+        );
+    };
+
+    match body.action.as_str() {
+        "archive" => inst.archive(),
+        "unarchive" => inst.unarchive(),
+        "favorite" => inst.favorite(),
+        "unfavorite" => inst.unfavorite(),
+        "snooze" => {
+            // Resolve duration from the profile config unless the
+            // caller passed an explicit override. Validate either way
+            // so the endpoint can't be used to sneak in absurd values.
+            let profile = inst.source_profile.clone();
+            let configured = crate::session::resolve_config(&profile)
+                .map(|c| c.session.snooze_duration_minutes as u64)
+                .unwrap_or(30);
+            let raw = body.minutes.unwrap_or(configured);
+            if let Err(msg) = crate::session::validate_snooze_duration(raw) {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(serde_json::json!({ "message": msg })),
+                );
+            }
+            inst.snooze(raw as u32);
+        }
+        "unsnooze" => inst.unsnooze(),
+        other => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({
+                    "message": format!(
+                        "unknown action: {} (expected archive|unarchive|favorite|unfavorite|snooze|unsnooze)",
+                        other
+                    )
+                })),
+            );
+        }
+    }
+
+    let response = SessionResponse::from(&*inst);
+    let profile = inst.source_profile.clone();
+
+    if let Ok(storage) = Storage::new(&profile) {
+        let profile_instances: Vec<_> = instances
+            .iter()
+            .filter(|i| i.source_profile == profile)
+            .cloned()
+            .collect();
+        if let Err(e) = storage.save(&profile_instances) {
+            tracing::error!("Failed to save after attention update: {e}");
         }
     }
 
