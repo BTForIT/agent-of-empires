@@ -120,6 +120,19 @@ pub struct Instance {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub favorited_at: Option<DateTime<Utc>>,
 
+    /// Snooze marker — "temporary archive." When `snoozed_until` is in the
+    /// future, the session sorts to tier 99 alongside archived rows and
+    /// renders italic+dim with a `z ` prefix plus a remaining-time readout
+    /// in the age column. When the timestamp falls into the past, the
+    /// `is_snoozed()` predicate returns false and the row naturally rejoins
+    /// the active attention sort (the stale timestamp stays on disk until
+    /// the next mutation rewrites it — harmless). Mutually compatible with
+    /// `favorited_at`: a snoozed favorite keeps its star when it wakes up.
+    /// Archive wins over snooze (archiving a snoozed session clears nothing
+    /// but renders as archive since is_archived() is checked first).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub snoozed_until: Option<DateTime<Utc>>,
+
     // Git worktree integration
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub worktree_info: Option<WorktreeInfo>,
@@ -180,6 +193,7 @@ impl Instance {
             last_accessed_at: None,
             archived_at: None,
             favorited_at: None,
+            snoozed_until: None,
             worktree_info: None,
             workspace_info: None,
             sandbox_info: None,
@@ -229,6 +243,44 @@ impl Instance {
 
     pub fn is_favorited(&self) -> bool {
         self.favorited_at.is_some()
+    }
+
+    /// Temporarily defer this session for `minutes` — sets `snoozed_until`
+    /// to `Utc::now() + minutes`. Behaves like a timed archive: the row
+    /// sinks to tier 99, renders italic+dim with a `z ` prefix, and shows
+    /// remaining time in the age column. When the timestamp expires the
+    /// row rejoins the active attention sort automatically (next render
+    /// tick) — no timer task needed. Resolution of `minutes` happens at
+    /// snooze time, not render time, so changing the config default mid-
+    /// snooze does NOT extend currently-sleeping rows.
+    pub fn snooze(&mut self, minutes: u32) {
+        self.snoozed_until = Some(Utc::now() + chrono::Duration::minutes(minutes as i64));
+    }
+
+    pub fn unsnooze(&mut self) {
+        self.snoozed_until = None;
+    }
+
+    /// True if `snoozed_until` is set AND in the future. Expired snoozes
+    /// return false so the row naturally rejoins the main sort on the next
+    /// render — the stale timestamp stays on disk until the next mutation
+    /// rewrites the session (harmless; `snoozed_until` is always compared
+    /// against `Utc::now()`).
+    pub fn is_snoozed(&self) -> bool {
+        self.snoozed_until.map(|t| t > Utc::now()).unwrap_or(false)
+    }
+
+    /// Remaining snooze duration as a `chrono::Duration`, or `None` if the
+    /// session isn't snoozed (or the timestamp has already expired).
+    pub fn snooze_remaining(&self) -> Option<chrono::Duration> {
+        self.snoozed_until.and_then(|t| {
+            let delta = t - Utc::now();
+            if delta > chrono::Duration::zero() {
+                Some(delta)
+            } else {
+                None
+            }
+        })
     }
 
     /// Whether the session is in a status that wants user attention. Used

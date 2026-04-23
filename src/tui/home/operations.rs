@@ -212,6 +212,48 @@ impl HomeView {
         Ok(None)
     }
 
+    /// Toggle the snooze state of the cursor's session. Session-only for
+    /// v1 (same scope as favorite). Snooze is "temporary archive" — sets
+    /// `snoozed_until = now + config.session.snooze_duration_minutes`, the
+    /// row sinks to tier 99 alongside archived rows, renders italic+dim
+    /// with a `z ` prefix and remaining-time in the age column, and wakes
+    /// back up automatically when the timer elapses (lazy — no background
+    /// task). Pressing `w`/`W` on a snoozed row clears `snoozed_until`
+    /// immediately (explicit wake). Duration is resolved at snooze time;
+    /// changing the config default does NOT extend in-flight snoozes.
+    pub(super) fn toggle_snooze_at_cursor(&mut self) -> anyhow::Result<Option<String>> {
+        let Some(id) = self.selected_session.clone() else {
+            return Ok(None);
+        };
+        let minutes = self.snooze_duration_minutes;
+        let mut new_state = false;
+        let mut title = String::new();
+        self.mutate_instance(&id, |inst| {
+            if inst.is_snoozed() {
+                inst.unsnooze();
+                new_state = false;
+            } else {
+                inst.snooze(minutes);
+                new_state = true;
+            }
+            title = inst.title.clone();
+        });
+        self.save()?;
+        self.flat_items = self.build_flat_items();
+        // Mirror the archive cursor-follow rule: after sending a row to
+        // sleep in the Attention sort, jump to the next needs-attention
+        // item so the user can keep triaging without the cursor dangling
+        // on whatever row shifted into that index.
+        if new_state && self.sort_order == crate::session::config::SortOrder::Attention {
+            self.select_top_attention(None);
+        }
+        Ok(Some(if new_state {
+            format!("Snoozed for {}m: {}", minutes, title)
+        } else {
+            format!("Woke: {}", title)
+        }))
+    }
+
     /// Toggle the favorite state of the cursor's session. Session-only for
     /// v1 (no group cascade — favorite is a "this one chat matters" signal,
     /// not a folder-level organizing tool). Pinning logic lives in

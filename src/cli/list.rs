@@ -36,6 +36,8 @@ struct SessionJson {
     status: crate::session::Status,
     #[serde(skip_serializing_if = "Option::is_none")]
     archived_at: Option<chrono::DateTime<chrono::Utc>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    snoozed_until: Option<chrono::DateTime<chrono::Utc>>,
 }
 
 fn print_table_header() {
@@ -98,6 +100,7 @@ pub async fn run(profile: &str, args: ListArgs) -> Result<()> {
                 created_at: inst.created_at,
                 status: inst.status,
                 archived_at: inst.archived_at,
+                snoozed_until: inst.snoozed_until,
             })
             .collect();
         println!("{}", serde_json::to_string_pretty(&sessions)?);
@@ -141,6 +144,7 @@ async fn run_all_profiles(json: bool) -> Result<()> {
                             created_at: inst.created_at,
                             status: inst.status,
                             archived_at: inst.archived_at,
+                            snoozed_until: inst.snoozed_until,
                         });
                     }
                 }

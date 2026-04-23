@@ -65,12 +65,34 @@ pub enum SessionCommands {
 
     /// Unfavorite a session (clears favorited_at).
     Unfavorite(SessionIdArgs),
+
+    /// Snooze a session (temporary archive). Sinks it to the bottom of
+    /// the Attention sort and renders it italic+dim with a `z ` prefix
+    /// and a remaining-time readout. Wakes automatically when the timer
+    /// expires. Default duration is the profile's
+    /// `session.snooze_duration_minutes` (default 30); override per-call
+    /// with `--minutes`.
+    Snooze(SnoozeArgs),
+
+    /// Unsnooze a session (clears snoozed_until — wakes it immediately).
+    Unsnooze(SessionIdArgs),
 }
 
 #[derive(Args)]
 pub struct SessionIdArgs {
     /// Session ID or title
     identifier: String,
+}
+
+#[derive(Args)]
+pub struct SnoozeArgs {
+    /// Session ID or title
+    identifier: String,
+
+    /// Override snooze duration in minutes (1-1440). If omitted, uses the
+    /// profile's configured `session.snooze_duration_minutes` (default 30).
+    #[arg(short = 'm', long)]
+    minutes: Option<u64>,
 }
 
 #[derive(Args)]
@@ -164,7 +186,66 @@ pub async fn run(profile: &str, command: SessionCommands) -> Result<()> {
         SessionCommands::Unarchive(args) => set_session_archived(profile, args, false).await,
         SessionCommands::Favorite(args) => set_session_favorited(profile, args, true).await,
         SessionCommands::Unfavorite(args) => set_session_favorited(profile, args, false).await,
+        SessionCommands::Snooze(args) => snooze_session(profile, args).await,
+        SessionCommands::Unsnooze(args) => unsnooze_session(profile, args).await,
     }
+}
+
+async fn snooze_session(profile: &str, args: SnoozeArgs) -> Result<()> {
+    let storage = Storage::new(profile)?;
+    let (mut instances, groups) = storage.load_with_groups()?;
+
+    let config = crate::session::profile_config::resolve_config(profile)?;
+
+    // `--minutes` overrides the profile default; otherwise use the
+    // configured `snooze_duration_minutes`. Validate either way so the
+    // on-disk config can't sneak in an out-of-range value.
+    let raw_minutes = args
+        .minutes
+        .unwrap_or(config.session.snooze_duration_minutes as u64);
+    crate::session::validate_snooze_duration(raw_minutes).map_err(|e| anyhow::anyhow!("{}", e))?;
+    let minutes = raw_minutes as u32;
+
+    let idx = instances
+        .iter()
+        .position(|i| {
+            i.id == args.identifier
+                || i.id.starts_with(&args.identifier)
+                || i.title == args.identifier
+        })
+        .ok_or_else(|| anyhow::anyhow!("Session not found: {}", args.identifier))?;
+
+    instances[idx].snooze(minutes);
+    let title = instances[idx].title.clone();
+
+    let group_tree = GroupTree::new_with_groups(&instances, &groups);
+    storage.save_with_groups(&instances, &group_tree)?;
+
+    println!("✓ Snoozed for {}m: {}", minutes, title);
+    Ok(())
+}
+
+async fn unsnooze_session(profile: &str, args: SessionIdArgs) -> Result<()> {
+    let storage = Storage::new(profile)?;
+    let (mut instances, groups) = storage.load_with_groups()?;
+
+    let idx = instances
+        .iter()
+        .position(|i| {
+            i.id == args.identifier
+                || i.id.starts_with(&args.identifier)
+                || i.title == args.identifier
+        })
+        .ok_or_else(|| anyhow::anyhow!("Session not found: {}", args.identifier))?;
+
+    instances[idx].unsnooze();
+    let title = instances[idx].title.clone();
+
+    let group_tree = GroupTree::new_with_groups(&instances, &groups);
+    storage.save_with_groups(&instances, &group_tree)?;
+
+    println!("✓ Woke: {}", title);
+    Ok(())
 }
 
 async fn set_session_favorited(profile: &str, args: SessionIdArgs, favorited: bool) -> Result<()> {
