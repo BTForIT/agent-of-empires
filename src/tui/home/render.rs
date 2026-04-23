@@ -438,8 +438,19 @@ impl HomeView {
                                 style = style
                                     .add_modifier(ratatui::style::Modifier::ITALIC)
                                     .add_modifier(ratatui::style::Modifier::DIM);
+                            } else if inst.is_favorited() {
+                                // Favorited, non-archived: bold + ⭐ prefix.
+                                // Archive wins over favorite if both are set
+                                // (intentional: user sunk it, visibility
+                                // sticks to the sink).
+                                style = style.add_modifier(ratatui::style::Modifier::BOLD);
                             }
-                            (icon, Cow::Owned(inst.title.clone()), style)
+                            let title_text = if inst.is_favorited() && !inst.is_archived() {
+                                Cow::Owned(format!("⭐ {}", inst.title))
+                            } else {
+                                Cow::Owned(inst.title.clone())
+                            };
+                            (icon, title_text, style)
                         }
                         ViewMode::Terminal => {
                             // For sandboxed sessions, check the appropriate terminal based on mode
@@ -468,8 +479,19 @@ impl HomeView {
                                 style = style
                                     .add_modifier(ratatui::style::Modifier::ITALIC)
                                     .add_modifier(ratatui::style::Modifier::DIM);
+                            } else if inst.is_favorited() {
+                                // Favorited, non-archived: bold + ⭐ prefix.
+                                // Archive wins over favorite if both are set
+                                // (intentional: user sunk it, visibility
+                                // sticks to the sink).
+                                style = style.add_modifier(ratatui::style::Modifier::BOLD);
                             }
-                            (icon, Cow::Owned(inst.title.clone()), style)
+                            let title_text = if inst.is_favorited() && !inst.is_archived() {
+                                Cow::Owned(format!("⭐ {}", inst.title))
+                            } else {
+                                Cow::Owned(inst.title.clone())
+                            };
+                            (icon, title_text, style)
                         }
                     }
                 } else {
@@ -934,6 +956,9 @@ impl HomeView {
         if !self.flat_items.is_empty() {
             groups.push((3, mk(if strict { "D" } else { "d" }, "Del")));
             groups.push((3, mk(if strict { "Z" } else { "z" }, "Archive")));
+        }
+        if self.selected_session.is_some() {
+            groups.push((3, mk(if strict { "F" } else { "f" }, "Fav")));
         }
 
         groups.push((4, mk("/", "Search")));

@@ -466,16 +466,26 @@ fn attention_tier(inst: &Instance) -> u8 {
 fn attention_session_key(
     inst: &Instance,
 ) -> (
+    bool,
     u8,
     bool,
     std::cmp::Reverse<Option<DateTime<Utc>>>,
     Option<DateTime<Utc>>,
 ) {
     let tier = attention_tier(inst);
+    // Favorite bias: a favorited session in a "needs help" status (Waiting,
+    // Error, Idle, Unknown) pre-empts non-favorited peers. Encoded as
+    // `!favorite_bias` because `false` sorts before `true` — favorited rows
+    // bubble above. Running / Stopped / transient sessions are never
+    // re-ranked by the favorite flag; the ⭐ glyph handles visibility.
+    // Archived short-circuits favorite entirely (an archived session is, by
+    // user intent, sunk; favorite is a noop in that state).
+    let favorite_bias = tier != 99 && inst.is_favorited() && inst.needs_help();
     if tier == 99 {
         // Archived: sort by archived_at desc (most recent first within the block).
         // `Reverse` on the main key, empty tail for shape parity.
         return (
+            !favorite_bias,
             tier,
             inst.archived_at.is_none(),
             Reverse(inst.archived_at),
@@ -487,6 +497,7 @@ fn attention_session_key(
     // Some() in the Reverse ordering) so it doesn't contribute — the real
     // tiebreak is the trailing ASC field.
     (
+        !favorite_bias,
         tier,
         inst.last_accessed_at.is_none(),
         Reverse(None),
@@ -517,6 +528,7 @@ fn attention_group_key(
     group_archived_at: Option<DateTime<Utc>>,
     instances: &[Instance],
 ) -> (
+    bool,
     u8,
     bool,
     Reverse<Option<DateTime<Utc>>>,
@@ -532,9 +544,9 @@ fn attention_group_key(
         // Empty group: if marked archived, sink to tier 99 with the group's
         // own archived_at; otherwise leave at u8::MAX (existing behavior).
         if let Some(ts) = group_archived_at {
-            return (99, false, Reverse(Some(ts)), None);
+            return (true, 99, false, Reverse(Some(ts)), None);
         }
-        return (u8::MAX, true, Reverse(None), None);
+        return (true, u8::MAX, true, Reverse(None), None);
     }
 
     let min_tier = members
@@ -543,13 +555,21 @@ fn attention_group_key(
         .min()
         .unwrap_or(u8::MAX);
 
+    // Group-level favorite bias: pin the group if any non-archived member is
+    // favorited AND in a "needs help" status. Mirrors the session key's
+    // `!favorite_bias` prepend so favorited groups bubble above peers.
+    let favorite_bias = min_tier != 99
+        && members
+            .iter()
+            .any(|i| !i.is_archived() && i.is_favorited() && i.needs_help());
+
     if min_tier == 99 {
         // All members archived: sort archived block by latest archived_at.
         // Falls back to the group's own archived_at if no member has one
         // (shouldn't happen given is_archived, but defensive).
         let max_arch = members.iter().filter_map(|i| i.archived_at).max();
         let ts = max_arch.or(group_archived_at);
-        return (99, ts.is_none(), Reverse(ts), None);
+        return (!favorite_bias, 99, ts.is_none(), Reverse(ts), None);
     }
 
     // Non-archived: "longest aging" = oldest max(last_accessed_at) first.
@@ -557,7 +577,13 @@ fn attention_group_key(
     // contribute — the real tiebreak is the trailing ASC field. Shape
     // mirrors `attention_session_key` so the intent is uniform.
     let max_last = members.iter().filter_map(|i| i.last_accessed_at).max();
-    (min_tier, max_last.is_none(), Reverse(None), max_last)
+    (
+        !favorite_bias,
+        min_tier,
+        max_last.is_none(),
+        Reverse(None),
+        max_last,
+    )
 }
 
 /// Flatten instances from multiple profiles into a single flat list.
@@ -1586,7 +1612,7 @@ mod tests {
 
         let instances = vec![a, b];
         let key = attention_group_key("work", None, &instances);
-        assert_eq!(key.0, 99, "all-archived group should sort to tier 99");
+        assert_eq!(key.1, 99, "all-archived group should sort to tier 99");
     }
 
     #[test]
@@ -1605,7 +1631,7 @@ mod tests {
         let instances = vec![archived_waiting, active_idle];
         let key = attention_group_key("work", None, &instances);
         assert_eq!(
-            key.0, 2,
+            key.1, 2,
             "group with one active Idle session should sort at tier 2"
         );
     }
@@ -1614,13 +1640,98 @@ mod tests {
     fn test_attention_group_key_empty_archived_group() {
         let now = chrono::Utc::now();
         let key = attention_group_key("empty", Some(now), &[]);
-        assert_eq!(key.0, 99, "empty archived group sinks to tier 99");
+        assert_eq!(key.1, 99, "empty archived group sinks to tier 99");
 
         let key_unarchived = attention_group_key("empty", None, &[]);
         assert_eq!(
-            key_unarchived.0,
+            key_unarchived.1,
             u8::MAX,
             "empty unarchived group keeps prior u8::MAX behavior"
+        );
+    }
+
+    #[test]
+    fn test_favorite_pins_waiting_above_non_favorited_waiting() {
+        // Two Waiting sessions. The favorited one must sort above the
+        // non-favorited one despite having no aging difference.
+        let mut fav = Instance::new("fav", "/tmp/fav");
+        fav.status = crate::session::Status::Waiting;
+        fav.favorite();
+        let plain = {
+            let mut p = Instance::new("plain", "/tmp/plain");
+            p.status = crate::session::Status::Waiting;
+            p
+        };
+        let fav_key = attention_session_key(&fav);
+        let plain_key = attention_session_key(&plain);
+        assert!(
+            fav_key < plain_key,
+            "favorited+Waiting should sort before non-favorited+Waiting: fav={fav_key:?} plain={plain_key:?}"
+        );
+    }
+
+    #[test]
+    fn test_favorite_pins_above_lower_tier_peers() {
+        // Favorited+Idle should beat non-favorited+Waiting. User's spec:
+        // "whenever it needs help it jumps to the top of the priority list."
+        let mut fav_idle = Instance::new("fav_idle", "/tmp/fi");
+        fav_idle.status = crate::session::Status::Idle;
+        fav_idle.favorite();
+        let mut plain_waiting = Instance::new("plain_waiting", "/tmp/pw");
+        plain_waiting.status = crate::session::Status::Waiting;
+        let fav_key = attention_session_key(&fav_idle);
+        let plain_key = attention_session_key(&plain_waiting);
+        assert!(
+            fav_key < plain_key,
+            "favorited+Idle should sort before plain+Waiting: fav={fav_key:?} plain={plain_key:?}"
+        );
+    }
+
+    #[test]
+    fn test_favorite_does_not_pin_running() {
+        // Favorited+Running has no bias (live work isn't interrupted by a
+        // sticker). Sort key should match non-favorited Running.
+        let mut fav_running = Instance::new("fav_r", "/tmp/fr");
+        fav_running.status = crate::session::Status::Running;
+        fav_running.favorite();
+        let mut plain_running = Instance::new("plain_r", "/tmp/pr");
+        plain_running.status = crate::session::Status::Running;
+        assert_eq!(
+            attention_session_key(&fav_running).0,
+            attention_session_key(&plain_running).0,
+            "favorite has no bias when status is Running"
+        );
+    }
+
+    #[test]
+    fn test_favorite_does_not_override_archive() {
+        // Archived+favorited sorts as archived (tier 99). User sunk it; the
+        // favorite decoration doesn't resurrect the row.
+        let mut inst = Instance::new("t", "/tmp/t");
+        inst.status = crate::session::Status::Waiting;
+        inst.favorite();
+        inst.archive();
+        let key = attention_session_key(&inst);
+        assert_eq!(key.1, 99, "archived wins: tier stays 99 despite favorite");
+        assert!(
+            key.0,
+            "no favorite bias when archived (bias bool is 'true' = !pinned)"
+        );
+    }
+
+    #[test]
+    fn test_favorited_session_serde_roundtrip() {
+        let mut inst = Instance::new("t", "/tmp/t");
+        inst.favorite();
+        let json = serde_json::to_string(&inst).unwrap();
+        assert!(
+            json.contains("favorited_at"),
+            "favorited_at must serialize when set"
+        );
+        let parsed: Instance = serde_json::from_str(&json).unwrap();
+        assert!(
+            parsed.is_favorited(),
+            "favorited_at round-trips through JSON"
         );
     }
 

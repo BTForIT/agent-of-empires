@@ -602,6 +602,20 @@ impl HomeView {
                     tracing::error!("toggle_archive_at_cursor failed: {}", e);
                 }
             }
+            // `f` / `F` — toggle favorite on the cursor's session (opposite
+            // of archive). Favorited + needs-help → pinned above non-favorited
+            // peers via `attention_session_key`. Visible via ⭐ glyph + bold
+            // in any state. Session-only for v1; group favorite not wired.
+            KeyCode::Char('f') if !self.strict_hotkeys => {
+                if let Err(e) = self.toggle_favorite_at_cursor() {
+                    tracing::error!("toggle_favorite_at_cursor failed: {}", e);
+                }
+            }
+            KeyCode::Char('F') if self.strict_hotkeys => {
+                if let Err(e) = self.toggle_favorite_at_cursor() {
+                    tracing::error!("toggle_favorite_at_cursor failed: {}", e);
+                }
+            }
             // `e` / `E` — restart the selected session (kill tmux pane and
             // re-spawn). Mnemonic: rEstart. Mirrors the non-strict/strict
             // pair pattern. F5 also bound below for muscle memory.
