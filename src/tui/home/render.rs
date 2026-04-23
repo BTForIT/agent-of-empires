@@ -1031,6 +1031,7 @@ impl HomeView {
         }
         if self.selected_session.is_some() {
             groups.push((3, mk(if strict { "F" } else { "f" }, "Fav")));
+            groups.push((3, mk(if strict { "W" } else { "w" }, "Snooze")));
         }
 
         groups.push((4, mk("/", "Search")));
