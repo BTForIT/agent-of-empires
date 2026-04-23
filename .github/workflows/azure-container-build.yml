@@ -1,0 +1,109 @@
+# Build and push the `aoe serve` container image to Azure Container
+# Registry (foritairegistry.azurecr.io/aoe-serve) for deployment into
+# Azure Container Apps.
+#
+# This is a FORK-ONLY workflow (BTForIT/agent-of-empires). Upstream
+# njbrake/agent-of-empires is untouched. See docs/deploy/AZURE.md.
+#
+# Secrets required on this repo:
+#   ACR_USERNAME   — ACR admin user or AAD service principal appId
+#   ACR_PASSWORD   — matching password / client secret
+#
+# (OIDC federation is the preferred long-term approach but adds Azure
+# AD app setup on top of this PR. Use username+password for bootstrap;
+# cut over to OIDC in a follow-up once the subscription admin wires the
+# federated credential.)
+
+name: azure-container-build
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - "Dockerfile"
+      - ".dockerignore"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "src/**"
+      - "build.rs"
+      - "web/**"
+      - "assets/**"
+      - ".github/workflows/azure-container-build.yml"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Extra tag to push alongside :latest and :<sha>"
+        required: false
+        default: ""
+
+concurrency:
+  group: azure-container-build-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  REGISTRY: foritairegistry.azurecr.io
+  IMAGE: aoe-serve
+
+jobs:
+  build-and-push:
+    name: Build + push to ACR
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to Azure Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ secrets.ACR_USERNAME }}
+          password: ${{ secrets.ACR_PASSWORD }}
+
+      - name: Compute tags
+        id: tags
+        run: |
+          SHA_TAG="${{ env.REGISTRY }}/${{ env.IMAGE }}:${{ github.sha }}"
+          LATEST_TAG="${{ env.REGISTRY }}/${{ env.IMAGE }}:latest"
+          TAGS="${SHA_TAG},${LATEST_TAG}"
+          if [ -n "${{ inputs.tag }}" ]; then
+            EXTRA="${{ env.REGISTRY }}/${{ env.IMAGE }}:${{ inputs.tag }}"
+            TAGS="${TAGS},${EXTRA}"
+          fi
+          {
+            echo "tags=${TAGS}"
+            echo "sha_tag=${SHA_TAG}"
+            echo "latest_tag=${LATEST_TAG}"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./Dockerfile
+          push: true
+          tags: ${{ steps.tags.outputs.tags }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          # linux/amd64 only for now — Container Apps in eastus runs
+          # amd64 nodes by default. Add linux/arm64 if we ever schedule
+          # onto ARM-based compute.
+          platforms: linux/amd64
+
+      - name: Summary
+        run: |
+          {
+            echo "### Pushed images"
+            echo ""
+            echo "- \`${{ steps.tags.outputs.sha_tag }}\`"
+            echo "- \`${{ steps.tags.outputs.latest_tag }}\`"
+            if [ -n "${{ inputs.tag }}" ]; then
+              echo "- \`${{ env.REGISTRY }}/${{ env.IMAGE }}:${{ inputs.tag }}\`"
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"

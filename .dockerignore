@@ -1,0 +1,58 @@
+# Keep the build context small and deterministic.
+
+# Git metadata
+.git
+.github
+
+# Local / editor
+.vscode
+.idea
+*.swp
+*.swo
+.DS_Store
+
+# Rust build artifacts (rebuilt inside the builder stage)
+target
+/target
+
+# AoE local state
+.agent-of-empires
+.aoe
+
+# Worktrees + nested trees
+.worktrees
+.gstack
+
+# Website (Astro docs site) — not used by the server build, skip
+# the whole tree so we don't ship docs source into the builder stage.
+website
+book
+dist
+
+# Test artifacts
+.playwright-mcp
+tests/**/*.cast
+*.screenstudio
+
+# Dev-only Docker assets (sandbox image, not the serve image)
+docker/Dockerfile.dev
+
+# Nix
+flake.lock
+flake.nix
+
+# Claude / agent-local config
+.claude
+.serena
+.opencode
+.sisyphus
+
+# Spec kit / generated
+.genreleases
+sdd-*
+
+# This Dockerfile + docs don't need themselves
+.dockerignore
+
+# Release tooling
+.gstack
