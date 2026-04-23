@@ -111,6 +111,15 @@ pub struct Instance {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub archived_at: Option<DateTime<Utc>>,
 
+    /// Favorite marker — sibling of archive. When set AND the session is in
+    /// a "needs help" status (Waiting, Error, Idle, Unknown), the session
+    /// pre-empts all non-favorited peers in the same status tier, pinning it
+    /// to the top of the Attention sort. In Running / Stopped / transient
+    /// statuses the flag is visible (⭐ glyph + bold) but does NOT re-rank
+    /// — live work isn't interrupted by a decoration. Opposite of archive.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub favorited_at: Option<DateTime<Utc>>,
+
     // Git worktree integration
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub worktree_info: Option<WorktreeInfo>,
@@ -170,6 +179,7 @@ impl Instance {
             created_at: Utc::now(),
             last_accessed_at: None,
             archived_at: None,
+            favorited_at: None,
             worktree_info: None,
             workspace_info: None,
             sandbox_info: None,
@@ -204,6 +214,32 @@ impl Instance {
 
     pub fn is_archived(&self) -> bool {
         self.archived_at.is_some()
+    }
+
+    /// Mark the session favorite. Sibling of `archive` — opposite semantics.
+    /// Pinning logic lives in `attention_session_key` (favorited + needs-help
+    /// sort key sinks non-favorited peers to right below).
+    pub fn favorite(&mut self) {
+        self.favorited_at = Some(Utc::now());
+    }
+
+    pub fn unfavorite(&mut self) {
+        self.favorited_at = None;
+    }
+
+    pub fn is_favorited(&self) -> bool {
+        self.favorited_at.is_some()
+    }
+
+    /// Whether the session is in a status that wants user attention. Used
+    /// as the gate for the favorite-pinning bias: only favoritedsessions
+    /// in these states jump to the top. Running/Stopped/transient get the
+    /// visual mark but no re-rank.
+    pub fn needs_help(&self) -> bool {
+        matches!(
+            self.status,
+            Status::Waiting | Status::Error | Status::Idle | Status::Unknown
+        )
     }
 
     pub fn is_sub_session(&self) -> bool {

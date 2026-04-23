@@ -55,6 +55,15 @@ pub enum SessionCommands {
 
     /// Unarchive a session (clears archived_at).
     Unarchive(SessionIdArgs),
+
+    /// Favorite a session. While favorited AND in a "needs help" status
+    /// (Waiting, Error, Idle, Unknown), it pins to the top of the Attention
+    /// sort above all non-favorited peers. Rendered bold with a ⭐ glyph.
+    /// Opposite of archive.
+    Favorite(SessionIdArgs),
+
+    /// Unfavorite a session (clears favorited_at).
+    Unfavorite(SessionIdArgs),
 }
 
 #[derive(Args)]
@@ -152,7 +161,41 @@ pub async fn run(profile: &str, command: SessionCommands) -> Result<()> {
         SessionCommands::Current(args) => current_session(args).await,
         SessionCommands::Archive(args) => set_session_archived(profile, args, true).await,
         SessionCommands::Unarchive(args) => set_session_archived(profile, args, false).await,
+        SessionCommands::Favorite(args) => set_session_favorited(profile, args, true).await,
+        SessionCommands::Unfavorite(args) => set_session_favorited(profile, args, false).await,
     }
+}
+
+async fn set_session_favorited(profile: &str, args: SessionIdArgs, favorited: bool) -> Result<()> {
+    let storage = Storage::new(profile)?;
+    let (mut instances, groups) = storage.load_with_groups()?;
+
+    let idx = instances
+        .iter()
+        .position(|i| {
+            i.id == args.identifier
+                || i.id.starts_with(&args.identifier)
+                || i.title == args.identifier
+        })
+        .ok_or_else(|| anyhow::anyhow!("Session not found: {}", args.identifier))?;
+
+    if favorited {
+        instances[idx].favorite();
+    } else {
+        instances[idx].unfavorite();
+    }
+    let title = instances[idx].title.clone();
+
+    let group_tree = GroupTree::new_with_groups(&instances, &groups);
+    storage.save_with_groups(&instances, &group_tree)?;
+
+    let verb = if favorited {
+        "Favorited"
+    } else {
+        "Unfavorited"
+    };
+    println!("✓ {} session: {}", verb, title);
+    Ok(())
 }
 
 async fn set_session_archived(profile: &str, args: SessionIdArgs, archived: bool) -> Result<()> {

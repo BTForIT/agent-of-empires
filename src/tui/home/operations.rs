@@ -212,6 +212,40 @@ impl HomeView {
         Ok(None)
     }
 
+    /// Toggle the favorite state of the cursor's session. Session-only for
+    /// v1 (no group cascade — favorite is a "this one chat matters" signal,
+    /// not a folder-level organizing tool). Pinning logic lives in
+    /// `attention_session_key` — no list rebuild needed beyond what
+    /// `save()` + `build_flat_items()` already do.
+    pub(super) fn toggle_favorite_at_cursor(&mut self) -> anyhow::Result<Option<String>> {
+        let Some(id) = self.selected_session.clone() else {
+            return Ok(None);
+        };
+        let mut new_state = false;
+        let mut title = String::new();
+        self.mutate_instance(&id, |inst| {
+            if inst.favorited_at.is_some() {
+                inst.favorited_at = None;
+                new_state = false;
+            } else {
+                inst.favorited_at = Some(Utc::now());
+                new_state = true;
+            }
+            title = inst.title.clone();
+        });
+        self.save()?;
+        self.flat_items = self.build_flat_items();
+        Ok(Some(format!(
+            "{}: {}",
+            if new_state {
+                "Favorited"
+            } else {
+                "Unfavorited"
+            },
+            title
+        )))
+    }
+
     pub(super) fn delete_selected(&mut self, options: &DeleteOptions) -> anyhow::Result<()> {
         if let Some(id) = &self.selected_session {
             let id = id.clone();
