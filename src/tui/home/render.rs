@@ -439,14 +439,16 @@ impl HomeView {
                                     .add_modifier(ratatui::style::Modifier::ITALIC)
                                     .add_modifier(ratatui::style::Modifier::DIM);
                             } else if inst.is_favorited() {
-                                // Favorited, non-archived: underline + "* "
-                                // prefix. ASCII-only glyph (previously used
+                                // Favorited, non-archived: bold + underlined
+                                // + "* " prefix. ASCII-only glyph (previously
                                 // ⭐ but emoji wide-width accounting mis-
                                 // aligned row truncation on iOS Blink /
                                 // Termius, causing stray combining-sequence
                                 // chars to bleed into the title). Archive
                                 // wins over favorite if both are set.
-                                style = style.add_modifier(ratatui::style::Modifier::UNDERLINED);
+                                style = style
+                                    .add_modifier(ratatui::style::Modifier::BOLD)
+                                    .add_modifier(ratatui::style::Modifier::UNDERLINED);
                             }
                             let title_text = if inst.is_favorited() && !inst.is_archived() {
                                 Cow::Owned(format!("* {}", inst.title))
@@ -483,14 +485,16 @@ impl HomeView {
                                     .add_modifier(ratatui::style::Modifier::ITALIC)
                                     .add_modifier(ratatui::style::Modifier::DIM);
                             } else if inst.is_favorited() {
-                                // Favorited, non-archived: underline + "* "
-                                // prefix. ASCII-only glyph (previously used
+                                // Favorited, non-archived: bold + underlined
+                                // + "* " prefix. ASCII-only glyph (previously
                                 // ⭐ but emoji wide-width accounting mis-
                                 // aligned row truncation on iOS Blink /
                                 // Termius, causing stray combining-sequence
                                 // chars to bleed into the title). Archive
                                 // wins over favorite if both are set.
-                                style = style.add_modifier(ratatui::style::Modifier::UNDERLINED);
+                                style = style
+                                    .add_modifier(ratatui::style::Modifier::BOLD)
+                                    .add_modifier(ratatui::style::Modifier::UNDERLINED);
                             }
                             let title_text = if inst.is_favorited() && !inst.is_archived() {
                                 Cow::Owned(format!("* {}", inst.title))

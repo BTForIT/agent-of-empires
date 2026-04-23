@@ -58,9 +58,9 @@ pub enum SessionCommands {
 
     /// Favorite a session. While favorited AND in a "needs help" status
     /// (Waiting, Error, Idle, Unknown), it pins to the top of the Attention
-    /// sort above all non-favorited peers. Rendered underlined with a "* "
-    /// prefix (ASCII, no emoji — avoids wide-width rendering artifacts on
-    /// narrow iOS terminals). Opposite of archive.
+    /// sort above all non-favorited peers. Rendered bold + underlined with
+    /// a "* " prefix (ASCII, no emoji — avoids wide-width rendering
+    /// artifacts on narrow iOS terminals). Opposite of archive.
     Favorite(SessionIdArgs),
 
     /// Unfavorite a session (clears favorited_at).
