@@ -28,11 +28,7 @@ foritairegistry.azurecr.io/aoe-serve:<sha>
 │  │ main: aoe serve (port 8080)│  ← HTTPS ingress │
 │  │   0.5 vCPU / 1 GiB         │     IP-restricted │
 │  │   scale-to-zero (min=0)    │     to forit-dev │
-│  └────────────────────────────┘     outbound     │
-│  ┌────────────────────────────┐                  │
-│  │ sidecar: docker:dind       │  ← for AoE's     │
-│  │   exposes /var/run/docker  │    container     │
-│  │   .sock to main container  │    terminals     │
+│  │   tmux-only (no Docker)    │     outbound     │
 │  └────────────────────────────┘                  │
 │  ┌────────────────────────────┐                  │
 │  │ Azure Files volume         │  ← survives      │
@@ -46,10 +42,17 @@ foritairegistry.azurecr.io/aoe-serve:<sha>
 
 - **Single shared `aoe-serve`, not per-user.** v1 scope. Per-user
   instances land when we onboard a second user.
-- **DinD sidecar** gives AoE a usable Docker socket so
-  `ensure_container_terminal` / the sandbox image work inside Container
-  Apps. If DinD proves flaky, fallback is a single Azure Container
-  Instance (full VM, native Docker). Documented, not built in v1.
+- **tmux-only, no Docker sandbox.** AoE's README lists Docker as
+  *optional* (for per-session sandbox isolation); tmux is the only
+  required prerequisite. Azure Container Apps **forbids privileged
+  containers** ([MS Learn][aca-limits]), which rules out a
+  `docker:dind` sidecar; Azure Container Instances forbids them too.
+  For single-tenant Bernard oversight, tmux process isolation is
+  sufficient. If per-session Docker sandboxing is ever needed
+  (e.g. untrusted code, multi-tenant), the v2 pivot is an Azure VM
+  — not a Container App.
+
+[aca-limits]: https://learn.microsoft.com/en-us/azure/container-apps/containers#limitations
 - **Scale-to-zero** because Bernard ticks on a cron, not continuously.
   Cold-start cost eats ~5s on the first tick; acceptable for an
   oversight loop that runs every 1–5 min.
@@ -139,8 +142,7 @@ the Container App binds `0.0.0.0` and exposes a public HTTPS endpoint
      `/home/aoe/.config/agent-of-empires`
    - Secret: `aoe-serve-passphrase` (random, 32+ chars)
    - Env: `AOE_SERVE_PASSPHRASE` = secretref `aoe-serve-passphrase`
-   - Sidecar container: `docker:dind` with
-     `DOCKER_TLS_CERTDIR=""` and privileged where allowed
+   - **No sidecars.** tmux-only v1; see "Why this shape" above.
 6. **Verify:**
    ```bash
    TOKEN=$(cat serve.token)  # the one we seeded
@@ -170,10 +172,13 @@ the Container App binds `0.0.0.0` and exposes a public HTTPS endpoint
 
 ## Known caveats
 
-- **DinD-in-Container-Apps:** reliability not yet proven at ForIT's
-  scale. Validate during first deploy. If flaky, cut over to an Azure
-  Container Instance (full VM, native Docker) — documented fallback in
-  the design doc, not built here.
+- **No Docker sandbox on ACA.** ACA (and ACI) forbid privileged
+  containers, which `docker:dind` requires. AoE runs in tmux-only
+  mode here, which is fine for single-tenant oversight but means
+  `ensure_container_terminal` will not work. If a session tries to
+  create a container-backed terminal, AoE will fail that session —
+  callers must pass `container: none` (or equivalent default) when
+  starting sessions. Docker sandboxing = v2 Azure VM pivot.
 - **Linux path vs. design-doc shorthand:** the design doc says "Azure
   Files mount at `/root/.aoe`." The actual mount is
   `/home/aoe/.config/agent-of-empires` because (a) AoE uses
