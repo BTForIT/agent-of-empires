@@ -208,11 +208,23 @@ impl Instance {
         }
     }
 
-    /// Stamp `last_accessed_at` to the current time. Call this on
-    /// user-initiated interactions (attach, send keys, etc.) so the
-    /// timestamp reflects actual activity, not just status transitions.
+    /// Stamp `last_accessed_at` to the current time AND wake the session
+    /// from any sink state. Call this on user-initiated interactions
+    /// (attach, send keys, etc.) — every existing call site already does.
+    ///
+    /// Auto-unarchive/unsnooze: sending a message or attaching is the user
+    /// explicitly saying "I care about this now." Leaving `archived_at` or
+    /// `snoozed_until` set after such interaction is incoherent — the row
+    /// would render italic+dim at tier 99 even while live traffic flows.
+    /// User rule (2026-04-23): "messaging should unarchive."
+    ///
+    /// `favorited_at` is preserved: fav is a positive "care more" signal,
+    /// orthogonal to the sink states. A favorited session that was snoozed
+    /// stays favorited when the user wakes it.
     pub fn touch_last_accessed(&mut self) {
         self.last_accessed_at = Some(Utc::now());
+        self.archived_at = None;
+        self.snoozed_until = None;
     }
 
     /// Mark the session archived. Archived sessions sink to the bottom of
