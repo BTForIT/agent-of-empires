@@ -26,7 +26,7 @@ use super::dialogs::ServeDialog;
 use super::dialogs::{
     ChangelogDialog, ConfirmDialog, GroupDeleteOptionsDialog, HookTrustDialog, HooksInstallDialog,
     InfoDialog, NewSessionData, NewSessionDialog, ProfilePickerDialog, RenameDialog,
-    UnifiedDeleteDialog, WelcomeDialog,
+    SnoozeDurationDialog, UnifiedDeleteDialog, WelcomeDialog,
 };
 use super::diff::DiffView;
 use super::settings::SettingsView;
@@ -163,6 +163,10 @@ pub struct HomeView {
     pub(super) welcome_dialog: Option<WelcomeDialog>,
     pub(super) changelog_dialog: Option<ChangelogDialog>,
     pub(super) info_dialog: Option<InfoDialog>,
+    pub(super) snooze_duration_dialog: Option<SnoozeDurationDialog>,
+    /// Session id the snooze duration picker targets. Set when the dialog
+    /// opens, consumed on submit.
+    pub(super) pending_snooze_session: Option<String>,
     pub(super) profile_picker_dialog: Option<ProfilePickerDialog>,
     #[cfg(feature = "serve")]
     pub(super) serve_dialog: Option<ServeDialog>,
@@ -344,6 +348,8 @@ impl HomeView {
             welcome_dialog: None,
             changelog_dialog: None,
             info_dialog: None,
+            snooze_duration_dialog: None,
+            pending_snooze_session: None,
             profile_picker_dialog: None,
             #[cfg(feature = "serve")]
             serve_dialog: None,
@@ -951,6 +957,7 @@ impl HomeView {
             || self.welcome_dialog.is_some()
             || self.changelog_dialog.is_some()
             || self.info_dialog.is_some()
+            || self.snooze_duration_dialog.is_some()
             || self.profile_picker_dialog.is_some()
             || self.send_message_dialog.is_some()
             || serve_open

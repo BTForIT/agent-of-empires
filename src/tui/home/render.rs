@@ -222,6 +222,10 @@ impl HomeView {
             dialog.render(frame, area, theme);
         }
 
+        if let Some(dialog) = &self.snooze_duration_dialog {
+            dialog.render(frame, area, theme);
+        }
+
         if let Some(dialog) = &self.profile_picker_dialog {
             dialog.render(frame, area, theme);
         }
