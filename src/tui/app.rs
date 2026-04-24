@@ -2,8 +2,8 @@
 
 use anyhow::Result;
 use crossterm::event::{
-    DisableBracketedPaste, EnableBracketedPaste, Event, EventStream, KeyCode, KeyEvent,
-    KeyModifiers,
+    DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture, Event,
+    EventStream, KeyCode, KeyEvent, KeyModifiers, MouseEventKind,
 };
 use futures_util::StreamExt;
 use ratatui::prelude::*;
@@ -113,6 +113,7 @@ impl App {
             terminal.backend_mut(),
             crossterm::terminal::LeaveAlternateScreen,
             DisableBracketedPaste,
+            DisableMouseCapture,
             crossterm::cursor::Show
         )?;
         std::io::Write::flush(terminal.backend_mut())?;
@@ -133,6 +134,7 @@ impl App {
             terminal.backend_mut(),
             crossterm::terminal::EnterAlternateScreen,
             EnableBracketedPaste,
+            EnableMouseCapture,
             crossterm::cursor::Hide
         )?;
         std::io::Write::flush(terminal.backend_mut())?;
@@ -248,7 +250,24 @@ impl App {
                             }
                             continue;
                         }
-                        Some(Ok(Event::Mouse(_))) => continue,
+                        Some(Ok(Event::Mouse(mouse))) => {
+                            let hit_scroll_target = if self.home.is_diff_open() {
+                                self.home.hit_diff(mouse.column, mouse.row)
+                            } else if self.home.has_selected_session() {
+                                self.home.hit_preview(mouse.column, mouse.row)
+                            } else {
+                                false
+                            };
+                            let handled = match mouse.kind {
+                                MouseEventKind::ScrollUp if hit_scroll_target => self.home.handle_scroll_up(),
+                                MouseEventKind::ScrollDown if hit_scroll_target => self.home.handle_scroll_down(),
+                                _ => false,
+                            };
+                            if handled {
+                                terminal.draw(|f| self.render(f))?;
+                            }
+                            continue;
+                        }
                         Some(Ok(Event::Paste(text))) => {
                             self.home.handle_paste(&text);
 

@@ -10,6 +10,7 @@ mod tests;
 use std::collections::{HashMap, HashSet};
 use std::time::Instant;
 
+use ratatui::prelude::Rect;
 use tui_input::Input;
 
 use crate::session::{
@@ -82,6 +83,11 @@ pub(super) struct PreviewCache {
     pub(super) content: String,
     pub(super) last_refresh: Instant,
     pub(super) dimensions: (u16, u16),
+    /// Number of lines that were captured into `content`. Used together with
+    /// the BUFFER reserve so consecutive wheel ticks don't trigger a fresh
+    /// `tmux capture-pane` subprocess while the cached window still covers
+    /// the requested scroll.
+    pub(super) captured_lines: usize,
 }
 
 impl Default for PreviewCache {
@@ -91,6 +97,7 @@ impl Default for PreviewCache {
             content: String::new(),
             last_refresh: Instant::now(),
             dimensions: (0, 0),
+            captured_lines: 0,
         }
     }
 }
@@ -208,6 +215,12 @@ pub struct HomeView {
     pub(super) preview_cache: PreviewCache,
     pub(super) terminal_preview_cache: PreviewCache,
     pub(super) container_terminal_preview_cache: PreviewCache,
+
+    /// Mouse wheel offset for the preview pane, in lines back from the bottom.
+    /// Reset to 0 whenever the selected session changes.
+    pub(super) preview_scroll_offset: u16,
+    pub(super) preview_area: Rect,
+    pub(super) diff_area: Rect,
 
     // Terminal mode for sandboxed sessions (per-session, ephemeral)
     pub(super) terminal_modes: HashMap<String, TerminalMode>,
@@ -360,6 +373,9 @@ impl HomeView {
             preview_cache: PreviewCache::default(),
             terminal_preview_cache: PreviewCache::default(),
             container_terminal_preview_cache: PreviewCache::default(),
+            preview_scroll_offset: 0,
+            preview_area: Rect::default(),
+            diff_area: Rect::default(),
             terminal_modes: HashMap::new(),
             default_terminal_mode,
             sound_config,
@@ -1064,6 +1080,7 @@ impl HomeView {
         self.preview_cache = PreviewCache::default();
         self.terminal_preview_cache = PreviewCache::default();
         self.container_terminal_preview_cache = PreviewCache::default();
+        self.preview_scroll_offset = 0;
         // Clear search since match indices are invalid with new flat_items
         if self.search_active {
             self.search_active = false;
