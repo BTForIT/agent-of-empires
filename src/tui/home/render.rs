@@ -581,7 +581,19 @@ impl HomeView {
         line_spans.push(Span::styled(format!("{} ", icon), icon_style));
         line_spans.push(Span::styled(
             text.into_owned(),
-            if is_selected { style.bold() } else { style },
+            if is_selected {
+                // Selected rows override fg to theme.text so faded statuses
+                // (idle/dim for archived/snoozed/stopped) stay readable
+                // against session_selection bg. Some themes (notably
+                // phosphor) have dim fg luminance close to session_selection
+                // luminance, making status-colored selected titles
+                // unreadable. Bold alone doesn't close the gap. Keeping
+                // italic where set so archive/snooze visual language still
+                // reads.
+                style.fg(theme.text).bold()
+            } else {
+                style
+            },
         ));
 
         if let Item::Session { id, .. } = item {
