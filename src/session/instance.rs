@@ -218,8 +218,14 @@ impl Instance {
     /// Mark the session archived. Archived sessions sink to the bottom of
     /// the Attention sort and render in italic+dim style, but remain
     /// visible. Auto-cleared by the attention-signal hook on Waiting/Error.
+    ///
+    /// Mutual exclusion with `favorite`: archiving clears `favorited_at`.
+    /// Archive is the strongest dismiss; keeping a stale favorite pin on a
+    /// row the user just sunk produces contradictory "pinned + dismissed"
+    /// state. The user's explicit rule: "archived removes fav."
     pub fn archive(&mut self) {
         self.archived_at = Some(Utc::now());
+        self.favorited_at = None;
     }
 
     pub fn unarchive(&mut self) {
@@ -233,8 +239,18 @@ impl Instance {
     /// Mark the session favorite. Sibling of `archive` — opposite semantics.
     /// Pinning logic lives in `attention_session_key` (favorited + needs-help
     /// sort key sinks non-favorited peers to right below).
+    ///
+    /// Mutual exclusion with the sink states: favoriting clears `archived_at`
+    /// AND `snoozed_until`. Favorite's whole purpose is "surface this row";
+    /// leaving either sink-state flag set would force the row to tier 99 and
+    /// the favorite bias would be suppressed — user presses `f` and sees
+    /// nothing change. The user's explicit rule: "marking as favorite
+    /// unarchives," extended to snooze because snooze shares tier 99 and
+    /// shares the burial outcome.
     pub fn favorite(&mut self) {
         self.favorited_at = Some(Utc::now());
+        self.archived_at = None;
+        self.snoozed_until = None;
     }
 
     pub fn unfavorite(&mut self) {
