@@ -1753,6 +1753,35 @@ mod tests {
     }
 
     #[test]
+    fn test_user_interaction_wakes_archive_and_snooze() {
+        // `touch_last_accessed` is called on every user-initiated
+        // interaction (send message, attach). User rule: "messaging should
+        // unarchive." A user talking to a session is explicit evidence they
+        // care about it — leaving it sunk at tier 99 is incoherent.
+        // Favorite stays (orthogonal signal).
+        let mut inst = Instance::new("t", "/tmp/t");
+        inst.favorite();
+        inst.archive();
+        // archive cleared fav per mutex; resurrect fav for this test
+        inst.favorite();
+        inst.snooze(30);
+        // snooze preserves fav; archive was cleared by fav above. Re-archive
+        // to cover both flags simultaneously (even though the mutex prevents
+        // the CLI paths from producing this state, the test exercises the
+        // wake logic directly).
+        inst.archived_at = Some(chrono::Utc::now());
+        assert!(
+            inst.is_archived() && inst.is_snoozed() && inst.is_favorited(),
+            "pre-condition: all three set"
+        );
+        inst.touch_last_accessed();
+        assert!(!inst.is_archived(), "user interaction cleared archive");
+        assert!(!inst.is_snoozed(), "user interaction cleared snooze");
+        assert!(inst.is_favorited(), "user interaction preserved favorite");
+        assert!(inst.last_accessed_at.is_some(), "timestamp stamped");
+    }
+
+    #[test]
     fn test_favorited_session_serde_roundtrip() {
         let mut inst = Instance::new("t", "/tmp/t");
         inst.favorite();
