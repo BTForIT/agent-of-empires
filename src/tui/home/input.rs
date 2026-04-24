@@ -142,6 +142,26 @@ impl HomeView {
             return None;
         }
 
+        if let Some(dialog) = &mut self.snooze_duration_dialog {
+            match dialog.handle_key(key) {
+                DialogResult::Continue => {}
+                DialogResult::Cancel => {
+                    self.snooze_duration_dialog = None;
+                    self.pending_snooze_session = None;
+                }
+                DialogResult::Submit(minutes) => {
+                    self.snooze_duration_dialog = None;
+                    let sid = self.pending_snooze_session.take();
+                    if let Some(id) = sid {
+                        if let Err(e) = self.snooze_session_for(&id, minutes) {
+                            tracing::error!("snooze_session_for failed: {}", e);
+                        }
+                    }
+                }
+            }
+            return None;
+        }
+
         // Handle other dialog input
         if self.show_help {
             if matches!(
