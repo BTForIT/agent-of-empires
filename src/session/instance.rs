@@ -249,8 +249,10 @@ impl Instance {
     }
 
     /// Mark the session favorite. Sibling of `archive` — opposite semantics.
-    /// Pinning logic lives in `attention_session_key` (favorited + needs-help
-    /// sort key sinks non-favorited peers to right below).
+    /// Pinning logic lives in `attention_session_key`: favorite is a
+    /// within-tier pin (top of its respective category), not a cross-tier
+    /// promoter. A favorited Running stays in the Running bucket but sorts
+    /// above non-favorited Running peers.
     ///
     /// Mutual exclusion with the sink states: favoriting clears `archived_at`
     /// AND `snoozed_until`. Favorite's whole purpose is "surface this row";
@@ -309,17 +311,6 @@ impl Instance {
                 None
             }
         })
-    }
-
-    /// Whether the session is in a status that wants user attention. Used
-    /// as the gate for the favorite-pinning bias: only favoritedsessions
-    /// in these states jump to the top. Running/Stopped/transient get the
-    /// visual mark but no re-rank.
-    pub fn needs_help(&self) -> bool {
-        matches!(
-            self.status,
-            Status::Waiting | Status::Error | Status::Idle | Status::Unknown
-        )
     }
 
     pub fn is_sub_session(&self) -> bool {
