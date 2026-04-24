@@ -1707,19 +1707,49 @@ mod tests {
     }
 
     #[test]
-    fn test_favorite_does_not_override_archive() {
-        // Archived+favorited sorts as archived (tier 99). User sunk it; the
-        // favorite decoration doesn't resurrect the row.
+    fn test_archive_clears_favorite() {
+        // Mutual exclusion: archive() explicitly clears favorited_at. The
+        // user's rule is "archived removes fav" — pinning a sunk row is
+        // incoherent, so archive hard-wins. Previous behavior (both flags
+        // coexisting with archive-beats-favorite at sort time) produced
+        // confusing "favorite icon on an archived row" JSON output.
         let mut inst = Instance::new("t", "/tmp/t");
         inst.status = crate::session::Status::Waiting;
         inst.favorite();
+        assert!(inst.is_favorited(), "pre-condition: fav is set");
         inst.archive();
+        assert!(inst.is_archived(), "archive set");
+        assert!(!inst.is_favorited(), "archive cleared favorite");
         let key = attention_session_key(&inst);
-        assert_eq!(key.1, 99, "archived wins: tier stays 99 despite favorite");
-        assert!(
-            key.0,
-            "no favorite bias when archived (bias bool is 'true' = !pinned)"
-        );
+        assert_eq!(key.1, 99, "tier 99 (archived)");
+        assert!(key.0, "no favorite bias (bias bool is 'true' = !pinned)");
+    }
+
+    #[test]
+    fn test_favorite_clears_archive() {
+        // User's rule: "marking as favorite unarchives." favorite()
+        // explicitly clears archived_at so pressing `f` on an archived
+        // row actually surfaces it. Without this, tier 99 suppresses the
+        // favorite bias and the row stays buried.
+        let mut inst = Instance::new("t", "/tmp/t");
+        inst.archive();
+        assert!(inst.is_archived(), "pre-condition: archived");
+        inst.favorite();
+        assert!(inst.is_favorited(), "fav set");
+        assert!(!inst.is_archived(), "fav cleared archive");
+    }
+
+    #[test]
+    fn test_favorite_clears_snooze() {
+        // Snooze shares tier 99 with archive, so a snoozed session is
+        // equally buried and equally defeats the favorite bias. Favorite's
+        // clear-everything-that-hides-me rule extends to snooze.
+        let mut inst = Instance::new("t", "/tmp/t");
+        inst.snooze(30);
+        assert!(inst.is_snoozed(), "pre-condition: snoozed");
+        inst.favorite();
+        assert!(inst.is_favorited(), "fav set");
+        assert!(!inst.is_snoozed(), "fav cleared snooze");
     }
 
     #[test]
