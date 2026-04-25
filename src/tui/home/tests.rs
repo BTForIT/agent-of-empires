@@ -734,6 +734,75 @@ fn test_select_session_by_id_nonexistent() {
 
 #[test]
 #[serial]
+fn test_select_top_attention_lands_on_first_session() {
+    let mut env = create_test_env_with_sessions(3);
+    env.view.cursor = 2;
+    env.view.update_selected();
+    assert_eq!(env.view.cursor, 2);
+
+    env.view.select_top_attention(None);
+
+    assert_eq!(env.view.cursor, 0);
+    if let Item::Session { id, .. } = &env.view.flat_items[0] {
+        assert_eq!(env.view.selected_session.as_deref(), Some(id.as_str()));
+    } else {
+        panic!("expected first flat_items row to be a Session");
+    }
+}
+
+#[test]
+#[serial]
+fn test_select_top_attention_skips_returning_session() {
+    let mut env = create_test_env_with_sessions(3);
+
+    // Grab id of first session (the one we're "returning from").
+    let first_id = if let Item::Session { id, .. } = &env.view.flat_items[0] {
+        id.clone()
+    } else {
+        panic!("expected first flat_items row to be a Session");
+    };
+    let second_id = if let Item::Session { id, .. } = &env.view.flat_items[1] {
+        id.clone()
+    } else {
+        panic!("expected second flat_items row to be a Session");
+    };
+
+    env.view.cursor = 0;
+    env.view.update_selected();
+
+    // Simulate returning from `first_id` — skip it, land on the next session.
+    env.view.select_top_attention(Some(&first_id));
+
+    assert_eq!(env.view.cursor, 1);
+    assert_eq!(
+        env.view.selected_session.as_deref(),
+        Some(second_id.as_str())
+    );
+}
+
+#[test]
+#[serial]
+fn test_select_top_attention_falls_back_to_returning_when_only_session() {
+    let mut env = create_test_env_with_sessions(1);
+
+    let only_id = if let Item::Session { id, .. } = &env.view.flat_items[0] {
+        id.clone()
+    } else {
+        panic!("expected first flat_items row to be a Session");
+    };
+
+    env.view.cursor = 0;
+    env.view.update_selected();
+
+    // Only one session — skip would leave nothing; must fall back to it.
+    env.view.select_top_attention(Some(&only_id));
+
+    assert_eq!(env.view.cursor, 0);
+    assert_eq!(env.view.selected_session.as_deref(), Some(only_id.as_str()));
+}
+
+#[test]
+#[serial]
 fn test_uppercase_p_opens_profile_picker() {
     let env = create_test_env_empty();
     let mut view = env.view;
@@ -1527,6 +1596,9 @@ fn test_o_key_cycles_sort_order_forward() {
     assert_eq!(env.view.sort_order, SortOrder::Newest);
 
     env.view.handle_key(key(KeyCode::Char('o')));
+    assert_eq!(env.view.sort_order, SortOrder::Attention);
+
+    env.view.handle_key(key(KeyCode::Char('o')));
     assert_eq!(env.view.sort_order, SortOrder::LastActivity);
 
     env.view.handle_key(key(KeyCode::Char('o')));
@@ -1540,6 +1612,68 @@ fn test_o_key_cycles_sort_order_forward() {
 
     env.view.handle_key(key(KeyCode::Char('o')));
     assert_eq!(env.view.sort_order, SortOrder::Newest);
+}
+
+#[test]
+#[serial]
+fn test_shift_o_cycles_sort_in_strict_mode() {
+    // Regression guard: normalize_strict_key maps Shift+O → bare 'o'. The main
+    // match must handle 'o' without an `if !self.strict_hotkeys` guard,
+    // otherwise the key falls through to capture_letter_to_compose and opens
+    // the message dialog instead of cycling sort.
+    use crate::session::config::SortOrder;
+
+    let mut env = create_test_env_with_mixed_sessions();
+    env.view.strict_hotkeys = true;
+    assert_eq!(env.view.sort_order, SortOrder::Newest);
+
+    // Shift+O: Char('O') with SHIFT modifier. Normalizer lowercases to 'o',
+    // main match cycles forward.
+    env.view
+        .handle_key(KeyEvent::new(KeyCode::Char('O'), KeyModifiers::SHIFT));
+    assert_eq!(env.view.sort_order, SortOrder::Attention);
+
+    // Some terminals drop the SHIFT modifier and send bare uppercase. Cover
+    // that too.
+    env.view
+        .handle_key(KeyEvent::new(KeyCode::Char('O'), KeyModifiers::NONE));
+    assert_eq!(env.view.sort_order, SortOrder::LastActivity);
+
+    // Ctrl+o must still cycle backward in strict mode.
+    env.view
+        .handle_key(KeyEvent::new(KeyCode::Char('o'), KeyModifiers::CONTROL));
+    assert_eq!(env.view.sort_order, SortOrder::Attention);
+
+    // Sanity: message dialog must NOT have been opened as a side effect.
+    assert!(env.view.send_message_dialog.is_none());
+}
+
+#[test]
+#[serial]
+fn test_bare_lowercase_o_does_not_cycle_sort_in_strict_mode() {
+    // Regression guard (2026-04-22): in strict_hotkeys mode, plain lowercase 'o'
+    // MUST NOT cycle sort — it must fall through to the typing-guard catch-all
+    // (message dialog) per the "no destructive lowercase" rule. Only Shift+O
+    // (Char('O')) and Ctrl+O should change sort order in strict mode.
+    //
+    // The previous implementation collapsed the two sort arms into a single
+    // unguarded `Char('o') => cycle`, which fired for bare 'o' too, breaking
+    // the contract and silently changing the user's sort order whenever they
+    // tried to type 'o' as text input.
+    use crate::session::config::SortOrder;
+
+    let mut env = create_test_env_with_mixed_sessions();
+    env.view.strict_hotkeys = true;
+    let initial = env.view.sort_order;
+    assert_eq!(initial, SortOrder::Newest);
+
+    env.view
+        .handle_key(KeyEvent::new(KeyCode::Char('o'), KeyModifiers::NONE));
+
+    assert_eq!(
+        env.view.sort_order, initial,
+        "bare 'o' in strict mode must NOT cycle sort — expected it to stay at Newest"
+    );
 }
 
 #[test]
@@ -1570,6 +1704,10 @@ fn test_ctrl_o_key_cycles_sort_order_backward() {
 
     env.view
         .handle_key(KeyEvent::new(KeyCode::Char('o'), KeyModifiers::CONTROL));
+    assert_eq!(env.view.sort_order, SortOrder::Attention);
+
+    env.view
+        .handle_key(KeyEvent::new(KeyCode::Char('o'), KeyModifiers::CONTROL));
     assert_eq!(env.view.sort_order, SortOrder::Newest);
 }
 
@@ -1581,7 +1719,8 @@ fn test_o_key_flat_items_sorted_az() {
     let mut env = create_test_env_with_mixed_sessions();
     assert_eq!(env.view.sort_order, SortOrder::Newest);
 
-    // Press 'o' three times to get to AZ (Newest -> LastActivity -> Oldest -> AZ)
+    // Press 'o' four times to get to AZ (Newest -> Attention -> LastActivity -> Oldest -> AZ)
+    env.view.handle_key(key(KeyCode::Char('o')));
     env.view.handle_key(key(KeyCode::Char('o')));
     env.view.handle_key(key(KeyCode::Char('o')));
     env.view.handle_key(key(KeyCode::Char('o')));
@@ -1614,8 +1753,9 @@ fn test_o_key_flat_items_sorted_za() {
 
     let mut env = create_test_env_with_mixed_sessions();
 
-    // Press 'o' four times to get to ZA
-    // (Newest -> LastActivity -> Oldest -> AZ -> ZA)
+    // Press 'o' five times to get to ZA
+    // (Newest -> Attention -> LastActivity -> Oldest -> AZ -> ZA)
+    env.view.handle_key(key(KeyCode::Char('o')));
     env.view.handle_key(key(KeyCode::Char('o')));
     env.view.handle_key(key(KeyCode::Char('o')));
     env.view.handle_key(key(KeyCode::Char('o')));
@@ -1649,8 +1789,9 @@ fn test_o_key_flat_items_newest_preserves_insertion_order() {
 
     let mut env = create_test_env_with_mixed_sessions();
 
-    // Press 'o' five times to wrap back to Newest
-    // (Newest -> LastActivity -> Oldest -> AZ -> ZA -> Newest)
+    // Press 'o' six times to wrap back to Newest
+    // (Newest -> Attention -> LastActivity -> Oldest -> AZ -> ZA -> Newest)
+    env.view.handle_key(key(KeyCode::Char('o')));
     env.view.handle_key(key(KeyCode::Char('o')));
     env.view.handle_key(key(KeyCode::Char('o')));
     env.view.handle_key(key(KeyCode::Char('o')));
@@ -1698,7 +1839,7 @@ fn test_o_key_clamps_cursor_when_list_shrinks() {
     assert!(filtered_count < initial_items);
 
     env.view.handle_key(key(KeyCode::Char('o')));
-    assert_eq!(env.view.sort_order, SortOrder::LastActivity);
+    assert_eq!(env.view.sort_order, SortOrder::Attention);
 
     let valid_max = env.view.flat_items.len().saturating_sub(1);
     assert!(env.view.cursor <= valid_max);

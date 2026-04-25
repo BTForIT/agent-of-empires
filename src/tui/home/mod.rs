@@ -27,7 +27,7 @@ use super::dialogs::ServeView;
 use super::dialogs::{
     ChangelogDialog, ConfirmDialog, GroupDeleteOptionsDialog, HookTrustDialog, HooksInstallDialog,
     InfoDialog, NewSessionData, NewSessionDialog, NoAgentsDialog, ProfilePickerDialog,
-    RenameDialog, UnifiedDeleteDialog, WelcomeDialog,
+    RenameDialog, SnoozeDurationDialog, UnifiedDeleteDialog, WelcomeDialog,
 };
 use super::diff::DiffView;
 use super::settings::SettingsView;
@@ -171,6 +171,10 @@ pub struct HomeView {
     pub(super) no_agents_dialog: Option<NoAgentsDialog>,
     pub(super) changelog_dialog: Option<ChangelogDialog>,
     pub(super) info_dialog: Option<InfoDialog>,
+    pub(super) snooze_duration_dialog: Option<SnoozeDurationDialog>,
+    /// Session id the snooze duration picker targets. Set when the dialog
+    /// opens, consumed on submit.
+    pub(super) pending_snooze_session: Option<String>,
     pub(super) profile_picker_dialog: Option<ProfilePickerDialog>,
     #[cfg(feature = "serve")]
     pub(super) serve_view: Option<ServeView>,
@@ -233,6 +237,12 @@ pub struct HomeView {
     // When true, letter-based action hotkeys require SHIFT (guard against
     // dictation / stray keystrokes triggering destructive actions).
     pub(super) strict_hotkeys: bool,
+
+    // Snooze duration applied when the user toggles snooze on a session.
+    // Snapshotted from `config.session.snooze_duration_minutes` at load/
+    // settings-reload time (same pattern as `strict_hotkeys`) so the hot
+    // path doesn't re-resolve the full config on every keypress.
+    pub(super) snooze_duration_minutes: u32,
 
     // Settings view
     pub(super) settings_view: Option<SettingsView>,
@@ -297,6 +307,10 @@ impl HomeView {
             .as_ref()
             .map(|config| config.session.strict_hotkeys)
             .unwrap_or(false);
+        let snooze_duration_minutes = resolved
+            .as_ref()
+            .map(|config| config.session.snooze_duration_minutes)
+            .unwrap_or(30);
         let user_config = load_config().ok().flatten();
         let sort_order = user_config
             .as_ref()
@@ -349,6 +363,8 @@ impl HomeView {
             no_agents_dialog: None,
             changelog_dialog: None,
             info_dialog: None,
+            snooze_duration_dialog: None,
+            pending_snooze_session: None,
             profile_picker_dialog: None,
             #[cfg(feature = "serve")]
             serve_view: None,
@@ -380,6 +396,7 @@ impl HomeView {
             default_terminal_mode,
             sound_config,
             strict_hotkeys,
+            snooze_duration_minutes,
             settings_view: None,
             settings_close_confirm: false,
             diff_view: None,
@@ -539,12 +556,22 @@ impl HomeView {
                         && update.status != Status::Stopped
                 });
 
+                // The poller no longer mutates last_accessed_at (that field
+                // is now user-interaction only), but we still carry the value
+                // back through StatusUpdate so a future change could reintroduce
+                // an automated signal without reshaping the plumbing. Writing
+                // the echoed value is a no-op when unchanged.
+                let new_last_accessed = update.last_accessed_at;
+
                 if should_update {
                     let new_status = update.status;
                     let new_error = update.last_error;
                     self.mutate_instance(&update.id, |inst| {
                         inst.status = new_status;
                         inst.last_error = new_error;
+                        if new_last_accessed.is_some() {
+                            inst.last_accessed_at = new_last_accessed;
+                        }
                     });
 
                     if let Some(old) = old_status {
@@ -552,6 +579,10 @@ impl HomeView {
                             crate::sound::play_for_transition(old, new_status, &self.sound_config);
                         }
                     }
+                } else if new_last_accessed.is_some() {
+                    self.mutate_instance(&update.id, |inst| {
+                        inst.last_accessed_at = new_last_accessed;
+                    });
                 }
             }
             self.pending_status_refresh = false;
@@ -945,6 +976,7 @@ impl HomeView {
             || self.no_agents_dialog.is_some()
             || self.changelog_dialog.is_some()
             || self.info_dialog.is_some()
+            || self.snooze_duration_dialog.is_some()
             || self.profile_picker_dialog.is_some()
             || self.send_message_dialog.is_some()
             || serve_open
@@ -1288,6 +1320,36 @@ impl HomeView {
         }
     }
 
+    pub fn sort_order(&self) -> SortOrder {
+        self.sort_order
+    }
+
+    /// Move the cursor to the highest-priority session row, skipping
+    /// `returning_id` if provided. Used after returning from an attach while
+    /// sort_order=Attention: `stamp_last_accessed` bumps the returning session
+    /// to the top of its tier, so picking row 0 blindly would leave the cursor
+    /// on the session the user just handled. Skip it and land on the next
+    /// session that actually needs attention. Falls back to the returning
+    /// session itself if it's the only one in the list.
+    pub fn select_top_attention(&mut self, returning_id: Option<&str>) {
+        let mut fallback: Option<usize> = None;
+        for (idx, item) in self.flat_items.iter().enumerate() {
+            if let Item::Session { id, .. } = item {
+                if returning_id.is_some_and(|r| r == id) {
+                    fallback.get_or_insert(idx);
+                    continue;
+                }
+                self.cursor = idx;
+                self.update_selected();
+                return;
+            }
+        }
+        if let Some(idx) = fallback {
+            self.cursor = idx;
+            self.update_selected();
+        }
+    }
+
     /// Get the terminal mode for a session (uses config default if not set)
     pub fn get_terminal_mode(&self, session_id: &str) -> TerminalMode {
         self.terminal_modes
@@ -1312,6 +1374,9 @@ impl HomeView {
 
             // Refresh strict-hotkeys mode
             self.strict_hotkeys = config.session.strict_hotkeys;
+
+            // Refresh snooze duration
+            self.snooze_duration_minutes = config.session.snooze_duration_minutes;
         }
     }
 

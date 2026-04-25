@@ -4,7 +4,24 @@ use anyhow::{bail, Result};
 use clap::{Args, Subcommand};
 use serde::Serialize;
 
-use crate::session::{GroupTree, Storage};
+use crate::session::{GroupTree, Instance, Storage};
+
+/// Refuse to act on archived sessions. Used by `restart` to honor the
+/// "archived = sunk; do not touch without explicit unarchive" invariant.
+/// Data-proven failure mode: without this guard, cx account-swap teardown
+/// and aoe-restart-all.sh both iterate every live tmux session and call
+/// `aoe session restart $title` for each — archived sessions were being
+/// restarted (and sent a wake-up prompt) despite the user sinking them.
+fn ensure_not_archived(inst: &Instance, identifier: &str) -> Result<()> {
+    if inst.archived_at.is_some() {
+        bail!(
+            "Session '{}' is archived — refusing to restart. Run `aoe session unarchive {}` first.",
+            inst.title,
+            identifier
+        );
+    }
+    Ok(())
+}
 
 #[derive(Subcommand)]
 pub enum SessionCommands {
@@ -31,12 +48,51 @@ pub enum SessionCommands {
 
     /// Auto-detect current session
     Current(CurrentArgs),
+
+    /// Archive a session (sinks it to the bottom of the Attention sort,
+    /// rendered in italic+dim; remains visible).
+    Archive(SessionIdArgs),
+
+    /// Unarchive a session (clears archived_at).
+    Unarchive(SessionIdArgs),
+
+    /// Favorite a session. While favorited AND in a "needs help" status
+    /// (Waiting, Error, Idle, Unknown), it pins to the top of the Attention
+    /// sort above all non-favorited peers. Rendered bold + underlined with
+    /// a "* " prefix (ASCII, no emoji — avoids wide-width rendering
+    /// artifacts on narrow iOS terminals). Opposite of archive.
+    Favorite(SessionIdArgs),
+
+    /// Unfavorite a session (clears favorited_at).
+    Unfavorite(SessionIdArgs),
+
+    /// Snooze a session (temporary archive). Sinks it to the bottom of
+    /// the Attention sort and renders it italic+dim with a `z ` prefix
+    /// and a remaining-time readout. Wakes automatically when the timer
+    /// expires. Default duration is the profile's
+    /// `session.snooze_duration_minutes` (default 30); override per-call
+    /// with `--minutes`.
+    Snooze(SnoozeArgs),
+
+    /// Unsnooze a session (clears snoozed_until — wakes it immediately).
+    Unsnooze(SessionIdArgs),
 }
 
 #[derive(Args)]
 pub struct SessionIdArgs {
     /// Session ID or title
     identifier: String,
+}
+
+#[derive(Args)]
+pub struct SnoozeArgs {
+    /// Session ID or title
+    identifier: String,
+
+    /// Override snooze duration in minutes (1-1440). If omitted, uses the
+    /// profile's configured `session.snooze_duration_minutes` (default 30).
+    #[arg(short = 'm', long)]
+    minutes: Option<u64>,
 }
 
 #[derive(Args)]
@@ -126,7 +182,130 @@ pub async fn run(profile: &str, command: SessionCommands) -> Result<()> {
         SessionCommands::Capture(args) => capture_session(profile, args).await,
         SessionCommands::Rename(args) => rename_session(profile, args).await,
         SessionCommands::Current(args) => current_session(args).await,
+        SessionCommands::Archive(args) => set_session_archived(profile, args, true).await,
+        SessionCommands::Unarchive(args) => set_session_archived(profile, args, false).await,
+        SessionCommands::Favorite(args) => set_session_favorited(profile, args, true).await,
+        SessionCommands::Unfavorite(args) => set_session_favorited(profile, args, false).await,
+        SessionCommands::Snooze(args) => snooze_session(profile, args).await,
+        SessionCommands::Unsnooze(args) => unsnooze_session(profile, args).await,
     }
+}
+
+async fn snooze_session(profile: &str, args: SnoozeArgs) -> Result<()> {
+    let storage = Storage::new(profile)?;
+    let (mut instances, groups) = storage.load_with_groups()?;
+
+    let config = crate::session::profile_config::resolve_config(profile)?;
+
+    // `--minutes` overrides the profile default; otherwise use the
+    // configured `snooze_duration_minutes`. Validate either way so the
+    // on-disk config can't sneak in an out-of-range value.
+    let raw_minutes = args
+        .minutes
+        .unwrap_or(config.session.snooze_duration_minutes as u64);
+    crate::session::validate_snooze_duration(raw_minutes).map_err(|e| anyhow::anyhow!("{}", e))?;
+    let minutes = raw_minutes as u32;
+
+    let idx = instances
+        .iter()
+        .position(|i| {
+            i.id == args.identifier
+                || i.id.starts_with(&args.identifier)
+                || i.title == args.identifier
+        })
+        .ok_or_else(|| anyhow::anyhow!("Session not found: {}", args.identifier))?;
+
+    instances[idx].snooze(minutes);
+    let title = instances[idx].title.clone();
+
+    let group_tree = GroupTree::new_with_groups(&instances, &groups);
+    storage.save_with_groups(&instances, &group_tree)?;
+
+    println!("✓ Snoozed for {}m: {}", minutes, title);
+    Ok(())
+}
+
+async fn unsnooze_session(profile: &str, args: SessionIdArgs) -> Result<()> {
+    let storage = Storage::new(profile)?;
+    let (mut instances, groups) = storage.load_with_groups()?;
+
+    let idx = instances
+        .iter()
+        .position(|i| {
+            i.id == args.identifier
+                || i.id.starts_with(&args.identifier)
+                || i.title == args.identifier
+        })
+        .ok_or_else(|| anyhow::anyhow!("Session not found: {}", args.identifier))?;
+
+    instances[idx].unsnooze();
+    let title = instances[idx].title.clone();
+
+    let group_tree = GroupTree::new_with_groups(&instances, &groups);
+    storage.save_with_groups(&instances, &group_tree)?;
+
+    println!("✓ Woke: {}", title);
+    Ok(())
+}
+
+async fn set_session_favorited(profile: &str, args: SessionIdArgs, favorited: bool) -> Result<()> {
+    let storage = Storage::new(profile)?;
+    let (mut instances, groups) = storage.load_with_groups()?;
+
+    let idx = instances
+        .iter()
+        .position(|i| {
+            i.id == args.identifier
+                || i.id.starts_with(&args.identifier)
+                || i.title == args.identifier
+        })
+        .ok_or_else(|| anyhow::anyhow!("Session not found: {}", args.identifier))?;
+
+    if favorited {
+        instances[idx].favorite();
+    } else {
+        instances[idx].unfavorite();
+    }
+    let title = instances[idx].title.clone();
+
+    let group_tree = GroupTree::new_with_groups(&instances, &groups);
+    storage.save_with_groups(&instances, &group_tree)?;
+
+    let verb = if favorited {
+        "Favorited"
+    } else {
+        "Unfavorited"
+    };
+    println!("✓ {} session: {}", verb, title);
+    Ok(())
+}
+
+async fn set_session_archived(profile: &str, args: SessionIdArgs, archived: bool) -> Result<()> {
+    let storage = Storage::new(profile)?;
+    let (mut instances, groups) = storage.load_with_groups()?;
+
+    let idx = instances
+        .iter()
+        .position(|i| {
+            i.id == args.identifier
+                || i.id.starts_with(&args.identifier)
+                || i.title == args.identifier
+        })
+        .ok_or_else(|| anyhow::anyhow!("Session not found: {}", args.identifier))?;
+
+    if archived {
+        instances[idx].archive();
+    } else {
+        instances[idx].unarchive();
+    }
+    let title = instances[idx].title.clone();
+
+    let group_tree = GroupTree::new_with_groups(&instances, &groups);
+    storage.save_with_groups(&instances, &group_tree)?;
+
+    let verb = if archived { "Archived" } else { "Unarchived" };
+    println!("✓ {} session: {}", verb, title);
+    Ok(())
 }
 
 async fn start_session(profile: &str, args: SessionIdArgs) -> Result<()> {
@@ -202,8 +381,33 @@ async fn restart_session(profile: &str, args: SessionIdArgs) -> Result<()> {
         })
         .ok_or_else(|| anyhow::anyhow!("Session not found: {}", args.identifier))?;
 
+    ensure_not_archived(&instances[idx], &args.identifier)?;
+
     instances[idx].restart_with_size(crate::terminal::get_size())?;
     let title = instances[idx].title.clone();
+    let session_id = instances[idx].id.clone();
+    let tool = instances[idx].tool.clone();
+
+    // Wait for the agent CLI to render its prompt before injecting input.
+    // Without this, keystrokes land in the shell before claude/opencode
+    // takes over the TTY and get lost.
+    std::thread::sleep(std::time::Duration::from_millis(2000));
+
+    let tmux_session = crate::tmux::Session::new(&session_id, &title)?;
+    if tmux_session.exists() {
+        let delay = crate::agents::send_keys_enter_delay(&tool);
+        let wake_msg = "wake up — pick up what you were doing";
+        match tmux_session.send_keys_with_delay(wake_msg, delay) {
+            Ok(()) => {
+                if let Some(inst) = instances.iter_mut().find(|i| i.id == session_id) {
+                    inst.touch_last_accessed();
+                }
+            }
+            Err(e) => {
+                eprintln!("Warning: failed to send wake-up message: {}", e);
+            }
+        }
+    }
 
     let group_tree = GroupTree::new_with_groups(&instances, &groups);
     storage.save_with_groups(&instances, &group_tree)?;
@@ -473,4 +677,37 @@ async fn current_session(args: CurrentArgs) -> Result<()> {
     }
 
     bail!("Current tmux session is not an Agent of Empires session")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ensure_not_archived_allows_live_session() {
+        let inst = Instance::new("forit-Avatics", "/tmp/x");
+        assert!(ensure_not_archived(&inst, "forit-Avatics").is_ok());
+    }
+
+    #[test]
+    fn ensure_not_archived_refuses_archived_session() {
+        let mut inst = Instance::new("forit-Avatics", "/tmp/x");
+        inst.archive();
+        let err = ensure_not_archived(&inst, "forit-Avatics").unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("archived"), "expected 'archived' in: {msg}");
+        assert!(msg.contains("forit-Avatics"), "expected title in: {msg}");
+        assert!(
+            msg.contains("unarchive"),
+            "expected recovery hint in: {msg}"
+        );
+    }
+
+    #[test]
+    fn ensure_not_archived_allows_after_unarchive() {
+        let mut inst = Instance::new("forit-Avatics", "/tmp/x");
+        inst.archive();
+        inst.unarchive();
+        assert!(ensure_not_archived(&inst, "forit-Avatics").is_ok());
+    }
 }

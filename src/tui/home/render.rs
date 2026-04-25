@@ -110,6 +110,28 @@ fn format_relative_age(ts: Option<DateTime<Utc>>) -> String {
     format!("{}mo", months)
 }
 
+/// Format a remaining snooze duration as a compact countdown string that
+/// fits in the `LAST_ACTIVITY_SLOT` (e.g. `23m`, `1h`, `59m`). Falls back
+/// to `<1m` for sub-minute remainders so the user sees "about to wake"
+/// rather than an empty slot. Days not expected (snooze is capped at 24h
+/// by `validate_snooze_duration`) but formatted defensively.
+fn format_snooze_remaining(delta: chrono::Duration) -> String {
+    let secs = delta.num_seconds();
+    if secs < 60 {
+        return "<1m".to_string();
+    }
+    let mins = secs / 60;
+    if mins < 60 {
+        return format!("{}m", mins);
+    }
+    let hours = mins / 60;
+    if hours < 24 {
+        return format!("{}h", hours);
+    }
+    let days = hours / 24;
+    format!("{}d", days)
+}
+
 /// Minimum column width required to render the last-activity column.
 /// When the session list is narrower than this, the column is hidden entirely.
 /// Compared against `inner.width` (list pane minus 2-char border), so this is
@@ -117,6 +139,12 @@ fn format_relative_age(ts: Option<DateTime<Utc>>) -> String {
 /// for users who set `home_list_width` in the 35–45 range (the common narrow-
 /// pane setting) and for mobile clients with tight pane widths; the 6-char
 /// age slot plus ~24 chars for title/branch still fits comfortably.
+///
+/// Must be low enough that a user who set `home_list_width = 40` still sees
+/// the column — 38 would be the tight floor but 30 gives comfort for narrower
+/// mobile panes (Moshi). Previously 50 (silently dropped the column for any
+/// common width) and then 40 (still failed at home_list_width=40 because the
+/// border ate 2 chars).
 const LAST_ACTIVITY_MIN_WIDTH: u16 = 30;
 
 /// Width reserved for the right-aligned last-activity column:
@@ -233,6 +261,7 @@ impl HomeView {
             no_agents_dialog,
             changelog_dialog,
             info_dialog,
+            snooze_duration_dialog,
             profile_picker_dialog,
             send_message_dialog,
         );
@@ -288,12 +317,23 @@ impl HomeView {
             ViewMode::Agent => (theme.border, theme.title),
             ViewMode::Terminal => (theme.terminal_border, theme.terminal_border),
         };
+        // Current sort indicator on the bottom-right of the list block. Uses
+        // ratatui's `title_bottom` so it renders on the existing border and
+        // never intersects row content.
+        let sort_indicator = format!(" sort: {} ", self.sort_order.label());
         let block = Block::default()
             .borders(Borders::TOP | Borders::LEFT | Borders::BOTTOM)
             .border_type(BorderType::Rounded)
             .border_style(Style::default().fg(border_color))
             .title(title)
             .title_style(Style::default().fg(title_color).bold())
+            .title_bottom(
+                Line::from(Span::styled(
+                    sort_indicator,
+                    Style::default().fg(theme.dimmed),
+                ))
+                .right_aligned(),
+            )
             .padding(Padding::horizontal(1));
 
         let inner = block.inner(area);
@@ -429,6 +469,7 @@ impl HomeView {
                 name,
                 collapsed,
                 session_count,
+                archived_at,
                 ..
             } => {
                 let icon = if *collapsed {
@@ -437,7 +478,14 @@ impl HomeView {
                     ICON_EXPANDED
                 };
                 let text = Cow::Owned(format!("{} ({})", name, session_count));
-                let style = Style::default().fg(theme.group).bold();
+                let mut style = Style::default().fg(theme.group).bold();
+                if archived_at.is_some() {
+                    // Archived groups: italic + dim, still visible at the
+                    // bottom of the Attention sort.
+                    style = style
+                        .add_modifier(ratatui::style::Modifier::ITALIC)
+                        .add_modifier(ratatui::style::Modifier::DIM);
+                }
                 (icon, text, style)
             }
             Item::Session { id, .. } => {
@@ -466,8 +514,48 @@ impl HomeView {
                                 Status::Deleting => theme.waiting,
                                 Status::Creating => theme.accent,
                             };
-                            let style = Style::default().fg(color);
-                            (icon, Cow::Owned(inst.title.clone()), style)
+                            let mut style = Style::default().fg(color);
+                            if inst.is_archived() {
+                                style = style
+                                    .add_modifier(ratatui::style::Modifier::ITALIC)
+                                    .add_modifier(ratatui::style::Modifier::DIM);
+                            } else if inst.is_snoozed() {
+                                // Snoozed = "temporary archive": same
+                                // italic+dim style as archive so the row
+                                // visually sinks, plus a `z ` ASCII prefix
+                                // (single-column glyph — mirrors the
+                                // favorite "* " fix that avoided iOS
+                                // emoji wide-width rendering bugs). The
+                                // age column separately shows remaining
+                                // sleep time.
+                                style = style
+                                    .add_modifier(ratatui::style::Modifier::ITALIC)
+                                    .add_modifier(ratatui::style::Modifier::DIM);
+                            } else if inst.is_favorited() {
+                                // Favorited, non-archived: bold + underlined
+                                // + "* " prefix. ASCII-only glyph (previously
+                                // ⭐ but emoji wide-width accounting mis-
+                                // aligned row truncation on iOS Blink /
+                                // Termius, causing stray combining-sequence
+                                // chars to bleed into the title). Archive
+                                // wins over favorite if both are set.
+                                style = style
+                                    .add_modifier(ratatui::style::Modifier::BOLD)
+                                    .add_modifier(ratatui::style::Modifier::UNDERLINED);
+                            }
+                            // Prefix priority: archive (no prefix) wins
+                            // over snooze (`z `) wins over favorite (`* `).
+                            // Matches the sort-tier priority: archive > snooze > favorite.
+                            let title_text = if inst.is_archived() {
+                                Cow::Owned(inst.title.clone())
+                            } else if inst.is_snoozed() {
+                                Cow::Owned(format!("z {}", inst.title))
+                            } else if inst.is_favorited() {
+                                Cow::Owned(format!("* {}", inst.title))
+                            } else {
+                                Cow::Owned(inst.title.clone())
+                            };
+                            (icon, title_text, style)
                         }
                         ViewMode::Terminal => {
                             // For sandboxed sessions, check the appropriate terminal based on mode
@@ -491,8 +579,41 @@ impl HomeView {
                             } else {
                                 (ICON_IDLE, theme.dimmed)
                             };
-                            let style = Style::default().fg(color);
-                            (icon, Cow::Owned(inst.title.clone()), style)
+                            let mut style = Style::default().fg(color);
+                            if inst.is_archived() {
+                                style = style
+                                    .add_modifier(ratatui::style::Modifier::ITALIC)
+                                    .add_modifier(ratatui::style::Modifier::DIM);
+                            } else if inst.is_snoozed() {
+                                // Same visual treatment as the Agent view
+                                // path above — italic+dim + `z ` prefix.
+                                // Style is applied here; prefix lives in
+                                // `title_text` below.
+                                style = style
+                                    .add_modifier(ratatui::style::Modifier::ITALIC)
+                                    .add_modifier(ratatui::style::Modifier::DIM);
+                            } else if inst.is_favorited() {
+                                // Favorited, non-archived: bold + underlined
+                                // + "* " prefix. ASCII-only glyph (previously
+                                // ⭐ but emoji wide-width accounting mis-
+                                // aligned row truncation on iOS Blink /
+                                // Termius, causing stray combining-sequence
+                                // chars to bleed into the title). Archive
+                                // wins over favorite if both are set.
+                                style = style
+                                    .add_modifier(ratatui::style::Modifier::BOLD)
+                                    .add_modifier(ratatui::style::Modifier::UNDERLINED);
+                            }
+                            let title_text = if inst.is_archived() {
+                                Cow::Owned(inst.title.clone())
+                            } else if inst.is_snoozed() {
+                                Cow::Owned(format!("z {}", inst.title))
+                            } else if inst.is_favorited() {
+                                Cow::Owned(format!("* {}", inst.title))
+                            } else {
+                                Cow::Owned(inst.title.clone())
+                            };
+                            (icon, title_text, style)
                         }
                     }
                 } else {
@@ -515,7 +636,19 @@ impl HomeView {
         line_spans.push(Span::styled(format!("{} ", icon), icon_style));
         line_spans.push(Span::styled(
             text.into_owned(),
-            if is_selected { style.bold() } else { style },
+            if is_selected {
+                // Selected rows override fg to theme.text so faded statuses
+                // (idle/dim for archived/snoozed/stopped) stay readable
+                // against session_selection bg. Some themes (notably
+                // phosphor) have dim fg luminance close to session_selection
+                // luminance, making status-colored selected titles
+                // unreadable. Bold alone doesn't close the gap. Keeping
+                // italic where set so archive/snooze visual language still
+                // reads.
+                style.fg(theme.text).bold()
+            } else {
+                style
+            },
         ));
 
         if let Item::Session { id, .. } = item {
@@ -538,12 +671,16 @@ impl HomeView {
                 // before the terminal-mode/status badge. Hidden when the list
                 // pane is too narrow to justify spending the horizontal budget.
                 if list_width >= LAST_ACTIVITY_MIN_WIDTH {
-                    let age = format_relative_age(inst.last_accessed_at);
-                    // Reserve LAST_ACTIVITY_SLOT cells; right-align inside the
-                    // slot so columns line up across rows of varying title
-                    // length. Empty `age` still reserves space — keeping the
-                    // column aligned is why we don't conditionally skip per
-                    // row.
+                    // Snoozed rows show remaining sleep time instead of
+                    // last-activity age, e.g. "23m" / "1h" / "59m". Gives
+                    // an at-a-glance "wakes back up in X" readout without
+                    // spending a separate column. Falls back to the normal
+                    // last-accessed age for non-snoozed rows.
+                    let age = if let Some(remaining) = inst.snooze_remaining() {
+                        format_snooze_remaining(remaining)
+                    } else {
+                        format_relative_age(inst.last_accessed_at)
+                    };
                     let padded = format!("{:>width$}", age, width = LAST_ACTIVITY_SLOT);
                     line_spans.push(Span::styled(padded, Style::default().fg(theme.dimmed)));
                 }
@@ -935,120 +1072,135 @@ impl HomeView {
         let key_style = Style::default().fg(theme.accent).bold();
         let desc_style = Style::default().fg(theme.dimmed);
         let sep_style = Style::default().fg(theme.border);
+        let strict = self.strict_hotkeys;
 
-        let mut spans: Vec<Span> = Vec::new();
+        // Priority-tagged shortcut groups. Lower priority = kept longer when
+        // the terminal is narrow (iPhone Moshi landscape ~80 cols). Essentials
+        // (Nav / Enter / Help / Quit / Serve indicator) survive first; Batch,
+        // Search, Diff, Mode drop first. Groups render in the declared order;
+        // a │ separator is inserted between kept groups at render time.
+        let mk = |key: &str, desc: &str| -> Vec<Span<'static>> {
+            vec![
+                Span::styled(format!(" {}", key), key_style),
+                Span::styled(format!(" {} ", desc), desc_style),
+            ]
+        };
 
-        // Serve indicator: shown only when the `aoe serve` daemon is live.
-        // The TUI does not own the daemon, so we probe the PID file each
-        // render. Mode comes from a PID-keyed cache so we don't read the
-        // serve.mode file from disk on every frame; the cache invalidates
-        // whenever the daemon PID changes (restart / fresh spawn).
+        let mut groups: Vec<(u8, Vec<Span<'static>>)> = Vec::new();
+
         #[cfg(feature = "serve")]
         {
             let mode_label = crate::cli::serve::cached_serve_mode_label();
-            // cached_serve_mode_label() returns None both for "no daemon"
-            // and "daemon but mode unknown", so check the daemon PID to
-            // distinguish — only render the indicator when there's a
-            // daemon, with the mode tag if we have it.
             if crate::cli::serve::daemon_pid().is_some() {
                 let label = match mode_label {
                     Some(m) => format!(" \u{25CF} Serving ({}) ", m),
                     None => " \u{25CF} Serving ".to_string(),
                 };
-                spans.extend([
-                    Span::styled(label, Style::default().fg(theme.running).bold()),
-                    Span::styled("│", sep_style),
-                ]);
+                groups.push((
+                    0,
+                    vec![Span::styled(
+                        label,
+                        Style::default().fg(theme.running).bold(),
+                    )],
+                ));
             }
         }
 
-        spans.extend([
-            Span::styled(" j/k", key_style),
-            Span::styled(" Nav ", desc_style),
-        ]);
+        groups.push((0, mk("j/k", "Nav")));
+
         if let Some(enter_action_text) = match self.flat_items.get(self.cursor) {
             Some(Item::Group {
                 collapsed: true, ..
-            }) => Some(" Expand "),
+            }) => Some("Expand"),
             Some(Item::Group {
                 collapsed: false, ..
-            }) => Some(" Collapse "),
-            Some(Item::Session { .. }) => Some(" Attach "),
+            }) => Some("Collapse"),
+            Some(Item::Session { .. }) => Some("Attach"),
             None => None,
         } {
-            spans.extend([
-                Span::styled("│", sep_style),
-                Span::styled(" Enter", key_style),
-                Span::styled(enter_action_text, desc_style),
-            ])
+            groups.push((0, mk("Enter", enter_action_text)));
         }
-        let strict = self.strict_hotkeys;
-        spans.extend([
-            Span::styled("│", sep_style),
-            Span::styled(if strict { " T" } else { " t" }, key_style),
-            Span::styled(" View ", desc_style),
-            Span::styled("│", sep_style),
-            Span::styled(if strict { " ^G" } else { " g" }, key_style),
-            Span::styled(" Group ", desc_style),
-        ]);
 
-        // Show c: container/host hint for sandboxed sessions in Terminal view
+        groups.push((2, mk(if strict { "T" } else { "t" }, "View")));
+        groups.push((3, mk(if strict { "^G" } else { "g" }, "Group")));
+
         if self.view_mode == ViewMode::Terminal {
             if let Some(id) = &self.selected_session {
                 if let Some(inst) = self.get_instance(id) {
                     if inst.is_sandboxed() {
-                        spans.extend([
-                            Span::styled("│", sep_style),
-                            Span::styled(if strict { " C" } else { " c" }, key_style),
-                            Span::styled(" Mode ", desc_style),
-                        ]);
+                        groups.push((4, mk(if strict { "C" } else { "c" }, "Mode")));
                     }
                 }
             }
         }
 
-        spans.extend([
-            Span::styled("│", sep_style),
-            Span::styled(if strict { " N" } else { " n" }, key_style),
-            Span::styled(" New ", desc_style),
-        ]);
+        groups.push((2, mk(if strict { "N" } else { "n" }, "New")));
+        groups.push((4, mk(if strict { "A" } else { "a" }, "Pick")));
+        groups.push((4, mk(if strict { "B" } else { "b" }, "Batch")));
 
+        // Priority 1: user's core daily workflow (message / archive / fav /
+        // snooze). These survive the greedy pack under narrow-pane widths
+        // (iPad Termius / Moshi ~80 cols) because they're the actions the
+        // user reaches for most often. Restart / Del stay at p3 — less
+        // frequent, OK to drop first.
         if self.selected_session.is_some() {
-            spans.extend([
-                Span::styled("│", sep_style),
-                Span::styled(if strict { " M" } else { " m" }, key_style),
-                Span::styled(" Msg ", desc_style),
-            ]);
+            groups.push((1, mk(if strict { "M" } else { "m" }, "Msg")));
+            groups.push((3, mk(if strict { "E" } else { "e" }, "Restart")));
         }
-
         if !self.flat_items.is_empty() {
-            spans.extend([
-                Span::styled("│", sep_style),
-                Span::styled(if strict { " D" } else { " d" }, key_style),
-                Span::styled(" Del ", desc_style),
-            ]);
+            groups.push((3, mk(if strict { "D" } else { "d" }, "Del")));
+            groups.push((1, mk(if strict { "Z" } else { "z" }, "Archive")));
+        }
+        if self.selected_session.is_some() {
+            groups.push((1, mk(if strict { "F" } else { "f" }, "Fav")));
+            groups.push((1, mk(if strict { "W" } else { "w" }, "Snooze")));
         }
 
-        spans.extend([
-            Span::styled("│", sep_style),
-            Span::styled(" /", key_style),
-            Span::styled(" Search ", desc_style),
-            Span::styled("│", sep_style),
-            Span::styled(if strict { " ^D" } else { " D" }, key_style),
-            Span::styled(" Diff ", desc_style),
-            Span::styled("│", sep_style),
-            Span::styled(" ?", key_style),
-            Span::styled(" Help ", desc_style),
-            Span::styled("│", sep_style),
-            // Mouse capture is enabled globally, which disables the terminal's
-            // native drag-to-select. Surface the modifier-key workaround so
-            // users don't think copy-paste is broken.
-            Span::styled(" ⌥/Shift+drag", key_style),
-            Span::styled(" Select ", desc_style),
-            Span::styled("│", sep_style),
-            Span::styled(if strict { " Q" } else { " q" }, key_style),
-            Span::styled(" Quit", desc_style),
-        ]);
+        groups.push((4, mk("/", "Search")));
+        groups.push((4, mk(if strict { "^D" } else { "D" }, "Diff")));
+        // Mouse capture is enabled globally, which disables the terminal's
+        // native drag-to-select. Surface the modifier-key workaround so users
+        // don't think copy-paste is broken. Moderate priority — useful but not
+        // critical, drops on narrow panes before ? / Quit.
+        groups.push((2, mk("\u{2325}/Shift+drag", "Select")));
+        groups.push((0, mk("?", "Help")));
+        groups.push((0, mk(if strict { "Q" } else { "q" }, "Quit")));
+
+        // Greedy pack by priority. Width of a group = sum of span char counts;
+        // separator between kept groups adds 1 col each.
+        let widths: Vec<usize> = groups
+            .iter()
+            .map(|(_, g)| g.iter().map(|s| s.content.chars().count()).sum::<usize>())
+            .collect();
+        let avail = area.width as usize;
+
+        let mut order: Vec<usize> = (0..groups.len()).collect();
+        order.sort_by_key(|&i| groups[i].0);
+
+        let mut keep = vec![false; groups.len()];
+        let mut used = 0usize;
+        let mut count = 0usize;
+        for i in order {
+            let sep = if count == 0 { 0 } else { 1 };
+            if used + widths[i] + sep <= avail {
+                keep[i] = true;
+                used += widths[i] + sep;
+                count += 1;
+            }
+        }
+
+        let mut spans: Vec<Span> = Vec::new();
+        let mut first = true;
+        for (i, (_, group)) in groups.into_iter().enumerate() {
+            if !keep[i] {
+                continue;
+            }
+            if !first {
+                spans.push(Span::styled("│", sep_style));
+            }
+            spans.extend(group);
+            first = false;
+        }
 
         let status = Paragraph::new(Line::from(spans)).style(Style::default().bg(theme.selection));
         frame.render_widget(status, area);

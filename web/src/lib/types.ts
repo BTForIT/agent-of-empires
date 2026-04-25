@@ -23,6 +23,12 @@ export interface SessionResponse {
   notify_on_waiting: boolean | null;
   notify_on_idle: boolean | null;
   notify_on_error: boolean | null;
+  /** Attention-sort overlay flags. RFC3339 timestamps when set, null
+   *  otherwise. `snoozed_until` may be a stale past timestamp — always
+   *  compare with `Date.now()` before treating the session as snoozed. */
+  archived_at: string | null;
+  favorited_at: string | null;
+  snoozed_until: string | null;
 }
 
 export interface CleanupDefaults {
