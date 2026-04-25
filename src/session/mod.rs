@@ -93,7 +93,16 @@ pub fn list_profiles() -> Result<Vec<String>> {
     let mut profiles = Vec::new();
     for entry in fs::read_dir(&profiles_dir)? {
         let entry = entry?;
-        if entry.path().is_dir() {
+        // Skip symlinks. The cs/cxa account-switcher creates symlinks like
+        // `forit-work -> default` so multiple Claude account names share a
+        // single profile directory; without this skip, every alias renders
+        // as a duplicate profile and the session list multiplies (the
+        // user's "three of every folder" symptom).
+        let file_type = entry.file_type()?;
+        if file_type.is_symlink() {
+            continue;
+        }
+        if file_type.is_dir() {
             if let Some(name) = entry.file_name().to_str() {
                 profiles.push(name.to_string());
             }
