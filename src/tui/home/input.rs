@@ -596,6 +596,15 @@ impl HomeView {
             }
             KeyCode::Char('q') if !self.strict_hotkeys => return Some(Action::Quit),
             KeyCode::Char('Q') => return Some(Action::Quit),
+            // iOS-friendly alt: strict_hotkeys mode normally requires Shift+Q,
+            // but iOS keyboards over Mosh/Termius/Blink strip Shift+letter
+            // events. Ctrl+q survives because Ctrl is a real key on iOS
+            // terminal apps.
+            KeyCode::Char('q')
+                if self.strict_hotkeys && key.modifiers.contains(KeyModifiers::CONTROL) =>
+            {
+                return Some(Action::Quit);
+            }
             KeyCode::Char('b') if !self.strict_hotkeys => {
                 // Batch-spawn sessions via the external `cxs` script. Drops out
                 // of the TUI, shows the fzf project picker, spawns selections
