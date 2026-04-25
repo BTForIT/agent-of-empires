@@ -516,19 +516,29 @@ impl HomeView {
                             };
                             let mut style = Style::default().fg(color);
                             if inst.is_archived() {
-                                style = style
+                                // Archive must visually demote the row even
+                                // when status would otherwise color it red
+                                // (Error) or amber (Waiting). DIM alone only
+                                // lowers intensity — it doesn't kill the hue,
+                                // so an archived Error row still screams red.
+                                // Override foreground to theme.dimmed so the
+                                // row reads as muted gray; the status icon
+                                // (✕ / ⠒ / etc.) keeps its semantic glyph.
+                                style = Style::default()
+                                    .fg(theme.dimmed)
                                     .add_modifier(ratatui::style::Modifier::ITALIC)
                                     .add_modifier(ratatui::style::Modifier::DIM);
                             } else if inst.is_snoozed() {
                                 // Snoozed = "temporary archive": same
-                                // italic+dim style as archive so the row
-                                // visually sinks, plus a `z ` ASCII prefix
-                                // (single-column glyph — mirrors the
-                                // favorite "* " fix that avoided iOS
-                                // emoji wide-width rendering bugs). The
-                                // age column separately shows remaining
-                                // sleep time.
-                                style = style
+                                // foreground demotion + italic+dim style as
+                                // archive so the row visually sinks
+                                // regardless of status, plus a `z ` ASCII
+                                // prefix (single-column glyph — mirrors the
+                                // favorite "* " fix that avoided iOS emoji
+                                // wide-width rendering bugs). The age column
+                                // separately shows remaining sleep time.
+                                style = Style::default()
+                                    .fg(theme.dimmed)
                                     .add_modifier(ratatui::style::Modifier::ITALIC)
                                     .add_modifier(ratatui::style::Modifier::DIM);
                             } else if inst.is_favorited() {
@@ -581,15 +591,21 @@ impl HomeView {
                             };
                             let mut style = Style::default().fg(color);
                             if inst.is_archived() {
-                                style = style
+                                // Same demote-foreground rule as the Agent
+                                // view path above — kill the active-terminal
+                                // hue when archived so the row visually
+                                // sinks regardless of session state.
+                                style = Style::default()
+                                    .fg(theme.dimmed)
                                     .add_modifier(ratatui::style::Modifier::ITALIC)
                                     .add_modifier(ratatui::style::Modifier::DIM);
                             } else if inst.is_snoozed() {
                                 // Same visual treatment as the Agent view
-                                // path above — italic+dim + `z ` prefix.
-                                // Style is applied here; prefix lives in
-                                // `title_text` below.
-                                style = style
+                                // path above — fg=dimmed + italic+dim + `z `
+                                // prefix. Style is applied here; prefix
+                                // lives in `title_text` below.
+                                style = Style::default()
+                                    .fg(theme.dimmed)
                                     .add_modifier(ratatui::style::Modifier::ITALIC)
                                     .add_modifier(ratatui::style::Modifier::DIM);
                             } else if inst.is_favorited() {
