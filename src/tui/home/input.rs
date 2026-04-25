@@ -596,15 +596,6 @@ impl HomeView {
             }
             KeyCode::Char('q') if !self.strict_hotkeys => return Some(Action::Quit),
             KeyCode::Char('Q') => return Some(Action::Quit),
-            // iOS-friendly alt: strict_hotkeys mode normally requires Shift+Q,
-            // but iOS keyboards over Mosh/Termius/Blink strip Shift+letter
-            // events. Ctrl+q survives because Ctrl is a real key on iOS
-            // terminal apps.
-            KeyCode::Char('q')
-                if self.strict_hotkeys && key.modifiers.contains(KeyModifiers::CONTROL) =>
-            {
-                return Some(Action::Quit);
-            }
             KeyCode::Char('b') if !self.strict_hotkeys => {
                 // Batch-spawn sessions via the external `cxs` script. Drops out
                 // of the TUI, shows the fzf project picker, spawns selections
@@ -1506,22 +1497,12 @@ impl HomeView {
                 self.apply_sort_order(self.sort_order.cycle());
             }
             // iPad-friendly ±10 aliases for PageUp/PageDown. iPads have no
-            // PageUp/PageDown keys, and Cmd combos are typically stripped by
-            // SSH/Mosh before reaching the TTY. Shift+Up/Down arrives intact
-            // on every terminal we test, and `{` / `}` (Shift+`[` / Shift+`]`)
-            // pass through as plain chars so Cmd+Shift+`[` / `]` works whether
-            // or not the terminal forwards Cmd. Both bind to the same step
-            // size as PageUp/PageDown to keep the mental model simple.
+            // Shift+Up / Shift+Down: ±10 navigation. Same step size as
+            // PageUp/PageDown for users on keyboards without those keys.
             KeyCode::Up if key.modifiers.contains(KeyModifiers::SHIFT) => {
                 self.move_cursor(-10);
             }
             KeyCode::Down if key.modifiers.contains(KeyModifiers::SHIFT) => {
-                self.move_cursor(10);
-            }
-            KeyCode::Char('{') => {
-                self.move_cursor(-10);
-            }
-            KeyCode::Char('}') => {
                 self.move_cursor(10);
             }
             KeyCode::Up | KeyCode::Char('k') => {
@@ -1583,15 +1564,6 @@ impl HomeView {
                 self.shrink_list();
             }
             KeyCode::Char('L') => {
-                self.grow_list();
-            }
-            // iOS-friendly alts: Shift+, and Shift+. arrive as plain '<' / '>'
-            // chars without a separate Shift modifier event, so they survive
-            // Mosh / Termius / Blink keyboard quirks that drop Shift+letter.
-            KeyCode::Char('<') => {
-                self.shrink_list();
-            }
-            KeyCode::Char('>') => {
                 self.grow_list();
             }
             KeyCode::Left | KeyCode::Char('h') => {
