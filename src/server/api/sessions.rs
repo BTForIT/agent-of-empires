@@ -1640,17 +1640,33 @@ pub async fn send_message(
             // Stamp last_accessed_at so the activity column reflects API-driven
             // interaction the same way TUI/web interaction does.
             let mut instances = state.instances.write().await;
-            if let Some(i) = instances.iter_mut().find(|i| i.id == id) {
+            let touched_profile = if let Some(i) = instances.iter_mut().find(|i| i.id == id) {
                 i.touch_last_accessed();
-            }
+                Some(i.source_profile.clone())
+            } else {
+                None
+            };
             // Best-effort persist; tmux send already succeeded so a save miss
             // shouldn't fail the whole call.
-            let profile = state.profile.clone();
-            let snapshot: Vec<Instance> = instances.clone();
+            //
+            // CRITICAL: filter to ONLY this instance's source_profile before
+            // saving. Cloning the full state.instances and writing it to a
+            // single profile's sessions.json corrupts the file when
+            // load_all_instances has merged sessions from multiple profiles
+            // (and especially when symlinks alias multiple "profiles" to the
+            // same on-disk file — the merged list gets written 3x). Original
+            // bug: 38 unique sessions appeared 114 times in default/sessions.json.
+            let target_profile =
+                touched_profile.unwrap_or_else(|| state.profile.clone());
+            let profile_snapshot: Vec<Instance> = instances
+                .iter()
+                .filter(|i| i.source_profile == target_profile)
+                .cloned()
+                .collect();
             drop(instances);
             tokio::task::spawn_blocking(move || {
-                if let Ok(storage) = Storage::new(&profile) {
-                    if let Err(e) = storage.save(&snapshot) {
+                if let Ok(storage) = Storage::new(&target_profile) {
+                    if let Err(e) = storage.save(&profile_snapshot) {
                         tracing::warn!("send_message: persist failed: {e}");
                     }
                 }
