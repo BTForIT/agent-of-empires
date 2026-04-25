@@ -1576,6 +1576,15 @@ impl HomeView {
             KeyCode::Char('L') => {
                 self.grow_list();
             }
+            // iOS-friendly alts: Shift+, and Shift+. arrive as plain '<' / '>'
+            // chars without a separate Shift modifier event, so they survive
+            // Mosh / Termius / Blink keyboard quirks that drop Shift+letter.
+            KeyCode::Char('<') => {
+                self.shrink_list();
+            }
+            KeyCode::Char('>') => {
+                self.grow_list();
+            }
             KeyCode::Left | KeyCode::Char('h') => {
                 if let Some(Item::Group {
                     path, collapsed, ..
