@@ -149,16 +149,21 @@ impl App {
     }
 
     pub fn set_theme(&mut self, name: &str) {
-        let palette_mode = load_config()
-            .ok()
-            .flatten()
-            .map(|c| {
-                matches!(
-                    c.theme.color_mode,
-                    crate::session::config::ColorMode::Palette
-                )
-            })
-            .unwrap_or(false);
+        // Honor the saved color_mode (Palette vs Truecolor). If we don't, a
+        // SetTheme dispatched from the Settings view preview/apply flow will
+        // re-load the theme with raw RGB colors — "breaking the coloration"
+        // on terminals that were working with the user's palette preference
+        // (Termius/mosh edge cases, 8-bit-only TTYs, etc.).
+        let palette_mode = crate::session::resolve_config(
+            self.home.active_profile.as_deref().unwrap_or("default"),
+        )
+        .map(|c| {
+            matches!(
+                c.theme.color_mode,
+                crate::session::config::ColorMode::Palette
+            )
+        })
+        .unwrap_or(false);
         self.theme = crate::tui::styles::load_theme_with_mode(name, palette_mode);
         self.needs_redraw = true;
     }
@@ -457,10 +462,12 @@ impl App {
                 return Ok(());
             }
             (KeyCode::Char('q'), _) if !self.home.has_dialog() => {
-                if self.home.is_creation_pending() {
-                    self.home.show_quit_during_creation_confirm();
-                    return Ok(());
-                }
+                // Aggressive quit. Ctrl-B D is the safe-detach path that bounces
+                // back to the shell without killing anything; `q` is the explicit
+                // "close aoe now" button. Even if a session creation is still in
+                // flight, cleanup_pending_creation() on shutdown cancels the hook
+                // and clears orphaned stubs (orphans are also swept on next
+                // launch — see home/mod.rs:820). No confirmation prompt.
                 self.should_quit = true;
                 return Ok(());
             }
@@ -519,7 +526,42 @@ impl App {
             Action::SetTheme(name) => {
                 self.set_theme(&name);
             }
+            Action::LaunchCxs => {
+                self.launch_cxs(terminal, false)?;
+            }
+            Action::LaunchCxsSingle => {
+                self.launch_cxs(terminal, true)?;
+            }
         }
+        Ok(())
+    }
+
+    fn launch_cxs(
+        &mut self,
+        terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>,
+        single: bool,
+    ) -> Result<()> {
+        let status = self.with_raw_mode_disabled(terminal, || {
+            let mut cmd = std::process::Command::new("cxs");
+            cmd.env("CXS_NO_TUI", "1");
+            if single {
+                cmd.env("CXS_SINGLE", "1");
+            }
+            cmd.status()
+        })?;
+
+        self.needs_redraw = true;
+        crate::tmux::refresh_session_cache();
+        self.home.reload()?;
+
+        if let Err(e) = status {
+            tracing::warn!("cxs launch returned error: {}", e);
+            self.home.info_dialog = Some(crate::tui::dialogs::InfoDialog::new(
+                "cxs failed",
+                &format!("Could not launch cxs: {}. Is ~/scripts/cxs on PATH?", e),
+            ));
+        }
+
         Ok(())
     }
 
@@ -631,7 +673,22 @@ impl App {
         crate::tmux::refresh_session_cache();
         self.home.reload()?;
         self.home.stamp_last_accessed(session_id);
-        self.home.select_session_by_id(session_id);
+        // Persist so the attach-return bump survives aoe restart. Same
+        // reasoning as the send-message path in home/input.rs: without a
+        // save() here the aging signal collapses back to startup timestamps
+        // on next launch.
+        if let Err(e) = self.home.save() {
+            tracing::error!("Failed to save after attach-return: {}", e);
+        }
+        // In Attention sort, jump cursor to the top-attention row instead of
+        // pinning it to the session we just came from — that session has
+        // typically been bumped down a tier (Waiting → Running) and the next
+        // item needing attention is now at row 0.
+        if self.home.sort_order() == crate::session::config::SortOrder::Attention {
+            self.home.select_top_attention(Some(session_id));
+        } else {
+            self.home.select_session_by_id(session_id);
+        }
 
         if let Err(e) = attach_result {
             tracing::warn!("tmux attach returned error: {}", e);
@@ -697,7 +754,11 @@ impl App {
         self.needs_redraw = true;
         crate::tmux::refresh_session_cache();
         self.home.reload()?;
-        self.home.select_session_by_id(session_id);
+        if self.home.sort_order() == crate::session::config::SortOrder::Attention {
+            self.home.select_top_attention(Some(session_id));
+        } else {
+            self.home.select_session_by_id(session_id);
+        }
 
         if let Err(e) = attach_result {
             tracing::warn!("tmux terminal attach returned error: {}", e);
@@ -772,6 +833,8 @@ pub enum Action {
     EditFile(PathBuf),
     StopSession(String),
     SetTheme(String),
+    LaunchCxs,
+    LaunchCxsSingle,
 }
 
 #[cfg(test)]

@@ -33,6 +33,13 @@ struct SessionJson {
     command: String,
     profile: String,
     created_at: chrono::DateTime<chrono::Utc>,
+    status: crate::session::Status,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    archived_at: Option<chrono::DateTime<chrono::Utc>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    favorited_at: Option<chrono::DateTime<chrono::Utc>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    snoozed_until: Option<chrono::DateTime<chrono::Utc>>,
 }
 
 fn print_table_header() {
@@ -93,6 +100,10 @@ pub async fn run(profile: &str, args: ListArgs) -> Result<()> {
                 command: inst.command.clone(),
                 profile: storage.profile().to_string(),
                 created_at: inst.created_at,
+                status: inst.status,
+                archived_at: inst.archived_at,
+                favorited_at: inst.favorited_at,
+                snoozed_until: inst.snoozed_until,
             })
             .collect();
         super::output::print_json(&sessions)?;
@@ -134,6 +145,10 @@ async fn run_all_profiles(json: bool) -> Result<()> {
                             command: inst.command,
                             profile: profile_name.clone(),
                             created_at: inst.created_at,
+                            status: inst.status,
+                            archived_at: inst.archived_at,
+                            favorited_at: inst.favorited_at,
+                            snoozed_until: inst.snoozed_until,
                         });
                     }
                 }
