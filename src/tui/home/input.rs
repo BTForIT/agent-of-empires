@@ -1557,7 +1557,10 @@ impl HomeView {
             // Mac, iPad, iPhone, mosh, ssh — no platform divergence (this
             // was my mistake to lump them with Ctrl+q in the parity revert).
             // PageUp/Down rarely exists on iOS soft keyboards; { / } is
-            // the third option that does.
+            // the third option that does. iPads have no PageUp/PageDown
+            // keys, and Cmd combos are typically stripped by SSH/Mosh
+            // before reaching the TTY; Shift+Up/Down arrives intact on
+            // every terminal we test.
             KeyCode::Up if key.modifiers.contains(KeyModifiers::SHIFT) => {
                 self.move_cursor(-10);
             }
