@@ -90,14 +90,20 @@ pub fn list_profiles() -> Result<Vec<String>> {
         return Ok(vec![]);
     }
 
+    list_profile_names_in(&profiles_dir)
+}
+
+/// Enumerate profile directory names in `profiles_dir`, skipping symlinks.
+/// Symlinks are aliases used by the `cs`/`cxa` account-switcher (e.g.
+/// `forit-work -> default`) so multiple Claude account names share a single
+/// profile directory; without the skip, every alias renders as a duplicate
+/// profile and the session list multiplies (the original "three of every
+/// folder" symptom). Extracted from `list_profiles` so tests can drive it
+/// against a tempdir.
+fn list_profile_names_in(profiles_dir: &std::path::Path) -> Result<Vec<String>> {
     let mut profiles = Vec::new();
-    for entry in fs::read_dir(&profiles_dir)? {
+    for entry in fs::read_dir(profiles_dir)? {
         let entry = entry?;
-        // Skip symlinks. The cs/cxa account-switcher creates symlinks like
-        // `forit-work -> default` so multiple Claude account names share a
-        // single profile directory; without this skip, every alias renders
-        // as a duplicate profile and the session list multiplies (the
-        // user's "three of every folder" symptom).
         let file_type = entry.file_type()?;
         if file_type.is_symlink() {
             continue;
@@ -110,6 +116,74 @@ pub fn list_profiles() -> Result<Vec<String>> {
     }
     profiles.sort();
     Ok(profiles)
+}
+
+#[cfg(test)]
+mod profile_listing_tests {
+    //! Regression tests for the "three of every folder" bug (2026-04-25).
+    //!
+    //! The `cs`/`cxa` account-switcher creates `~/.agent-of-empires/profiles/<name>`
+    //! as a symlink to `default` so multiple Claude account names share a
+    //! single AOE profile directory. Before the fix, `list_profiles()` used
+    //! `entry.path().is_dir()` which follows symlinks, so each alias was
+    //! enumerated as a separate profile and the all-profiles session list
+    //! rendered the same data N times.
+    //!
+    //! These tests pin the skip-symlink behavior so a future refactor that
+    //! "simplifies" the file-type check fails CI instead of silently
+    //! re-introducing the duplication.
+    use super::*;
+    use std::fs;
+    use std::os::unix::fs::symlink;
+
+    fn make_temp_profiles_dir() -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "aoe-profile-listing-test-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0),
+        ));
+        fs::create_dir_all(&dir).expect("create tempdir");
+        dir
+    }
+
+    #[test]
+    fn list_profile_names_skips_symlinks_to_real_profiles() {
+        let dir = make_temp_profiles_dir();
+        fs::create_dir(dir.join("default")).unwrap();
+        fs::create_dir(dir.join("personal")).unwrap();
+        // The cs/cxa pattern: aliases are symlinks pointing at `default`.
+        symlink("default", dir.join("forit-work")).unwrap();
+        symlink("default", dir.join("wma-work")).unwrap();
+
+        let names = list_profile_names_in(&dir).expect("list");
+        assert_eq!(
+            names,
+            vec!["default".to_string(), "personal".to_string()],
+            "symlinked aliases must be invisible to list_profiles — \
+             otherwise each alias inflates the all-profiles session list \
+             with duplicates of the linked profile's data (the original \
+             three-of-every-folder bug)."
+        );
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn list_profile_names_includes_real_dirs_only() {
+        let dir = make_temp_profiles_dir();
+        fs::create_dir(dir.join("default")).unwrap();
+        fs::create_dir(dir.join("work")).unwrap();
+        // A regular file in profiles/ should also be ignored.
+        fs::write(dir.join("README"), "ignore me").unwrap();
+
+        let names = list_profile_names_in(&dir).expect("list");
+        assert_eq!(names, vec!["default".to_string(), "work".to_string()]);
+
+        let _ = fs::remove_dir_all(&dir);
+    }
 }
 
 pub fn create_profile(name: &str) -> Result<()> {
