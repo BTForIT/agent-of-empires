@@ -280,6 +280,16 @@ impl App {
 
                             continue;
                         }
+                        Some(Ok(Event::Resize(_, _))) => {
+                            // Mosh / iOS keyboard slide / window resize:
+                            // ratatui's Terminal autosizes on draw, so trigger
+                            // an immediate redraw — without this, the previous
+                            // viewport's layout stays painted and the bottom
+                            // rows render off-screen on iPad / iPhone clients.
+                            terminal.autoresize()?;
+                            terminal.draw(|f| self.render(f))?;
+                            continue;
+                        }
                         Some(Ok(_)) => {}
                         Some(Err(e)) => {
                             // IO error reading from the terminal (broken pipe,
