@@ -247,11 +247,17 @@ fn default_snooze_duration_minutes() -> u32 {
 /// Validate a snooze duration in minutes. Accepts 1..=1440 (1 minute to
 /// 24 hours). Values outside this range are rejected by the settings UI
 /// and the CLI `--minutes` flag.
+/// Upper bound on snooze duration: 30 days (43,200 minutes). Originally
+/// capped at 24 hours but the TUI snooze dialog now offers up to a 1-week
+/// preset and longer ad-hoc values via the API are reasonable for
+/// long-tail "circle back next month" workflows.
+pub const SNOOZE_MAX_MINUTES: u64 = 30 * 24 * 60;
+
 pub fn validate_snooze_duration(minutes: u64) -> Result<(), String> {
-    if !(1..=1440).contains(&minutes) {
+    if !(1..=SNOOZE_MAX_MINUTES).contains(&minutes) {
         return Err(format!(
-            "Snooze duration must be between 1 and 1440 minutes (got {})",
-            minutes
+            "Snooze duration must be between 1 and {} minutes (got {})",
+            SNOOZE_MAX_MINUTES, minutes
         ));
     }
     Ok(())
@@ -1281,7 +1287,20 @@ mod tests {
     #[test]
     fn test_validate_snooze_duration_rejects_out_of_range() {
         assert!(validate_snooze_duration(0).is_err());
-        assert!(validate_snooze_duration(1441).is_err());
+        assert!(validate_snooze_duration(SNOOZE_MAX_MINUTES + 1).is_err());
+    }
+
+    #[test]
+    fn test_validate_snooze_duration_accepts_dialog_presets() {
+        // The TUI dialog presets must all pass the validator; otherwise
+        // the API silently rejects what the UI offered. Presets ascend
+        // 15min → 1 week.
+        for &m in &[15u64, 30, 60, 120, 240, 480, 1440, 3 * 1440, 7 * 1440] {
+            assert!(
+                validate_snooze_duration(m).is_ok(),
+                "preset {m} min must pass validator"
+            );
+        }
     }
 
     #[test]
