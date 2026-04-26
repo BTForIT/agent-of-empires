@@ -24,16 +24,16 @@ impl HomeView {
         self.diff_view.is_some()
     }
 
-    pub fn has_selected_session(&self) -> bool {
-        self.selected_session.is_some()
-    }
-
     pub fn hit_preview(&self, col: u16, row: u16) -> bool {
         self.preview_area.contains(Position::from((col, row)))
     }
 
     pub fn hit_diff(&self, col: u16, row: u16) -> bool {
         self.diff_area.contains(Position::from((col, row)))
+    }
+
+    pub fn hit_list(&self, col: u16, row: u16) -> bool {
+        self.list_area.contains(Position::from((col, row)))
     }
 
     pub fn handle_key(&mut self, key: KeyEvent) -> Option<Action> {
@@ -1711,13 +1711,13 @@ impl HomeView {
         }
     }
 
-    /// Scroll the preview pane up by one mouse-wheel step. Returns `true` if
-    /// the UI should redraw. When the diff view is open, scroll the diff
-    /// content instead. When no session is selected (list pane has focus),
-    /// route the wheel event to list navigation so iOS-Mosh touch-scroll
-    /// can move the cursor (mouse capture would otherwise eat the event
-    /// and the user sees nothing happen).
-    pub fn handle_scroll_up(&mut self) -> bool {
+    /// Route a mouse-wheel-up at (col, row) to the pane under the cursor:
+    /// diff view (if open) → diff scroll; list pane → list cursor up;
+    /// preview pane → preview scroll. Returns `true` if the UI should
+    /// redraw. Position-aware so iOS-Mosh touch-scroll moves the LIST
+    /// when the user is touching the list pane (regardless of whether
+    /// a session is currently selected).
+    pub fn handle_scroll_up(&mut self, col: u16, row: u16) -> bool {
         const STEP: u16 = 3;
         if let Some(ref mut diff) = self.diff_view {
             diff.scroll_up(STEP);
@@ -1726,9 +1726,12 @@ impl HomeView {
         if self.has_dialog() {
             return false;
         }
-        if self.selected_session.is_none() {
+        if self.hit_list(col, row) {
             self.move_cursor(-1);
             return true;
+        }
+        if !self.hit_preview(col, row) || self.selected_session.is_none() {
+            return false;
         }
 
         let active_cache = match self.view_mode {
@@ -1765,11 +1768,8 @@ impl HomeView {
         true
     }
 
-    /// Scroll the preview pane down by one mouse-wheel step. Returns `true`
-    /// if the UI should redraw. When the diff view is open, scroll the diff
-    /// content instead. When no session is selected (list pane has focus),
-    /// route the wheel event to list navigation — see handle_scroll_up.
-    pub fn handle_scroll_down(&mut self) -> bool {
+    /// Route a mouse-wheel-down at (col, row) — see handle_scroll_up.
+    pub fn handle_scroll_down(&mut self, col: u16, row: u16) -> bool {
         const STEP: u16 = 3;
         if let Some(ref mut diff) = self.diff_view {
             diff.scroll_down(STEP);
@@ -1778,9 +1778,12 @@ impl HomeView {
         if self.has_dialog() {
             return false;
         }
-        if self.selected_session.is_none() {
+        if self.hit_list(col, row) {
             self.move_cursor(1);
             return true;
+        }
+        if !self.hit_preview(col, row) || self.selected_session.is_none() {
+            return false;
         }
         if self.preview_scroll_offset == 0 {
             return false;

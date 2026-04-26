@@ -219,6 +219,7 @@ pub struct HomeView {
     pub(super) preview_scroll_offset: u16,
     pub(super) preview_area: Rect,
     pub(super) diff_area: Rect,
+    pub(super) list_area: Rect,
 
     // Terminal mode for sandboxed sessions (per-session, ephemeral)
     pub(super) terminal_modes: HashMap<String, TerminalMode>,
@@ -390,6 +391,7 @@ impl HomeView {
             preview_scroll_offset: 0,
             preview_area: Rect::default(),
             diff_area: Rect::default(),
+            list_area: Rect::default(),
             terminal_modes: HashMap::new(),
             default_terminal_mode,
             sound_config,

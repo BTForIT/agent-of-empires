@@ -258,14 +258,17 @@ impl App {
                         Some(Ok(Event::Mouse(mouse))) => {
                             let hit_scroll_target = if self.home.is_diff_open() {
                                 self.home.hit_diff(mouse.column, mouse.row)
-                            } else if self.home.has_selected_session() {
-                                self.home.hit_preview(mouse.column, mouse.row)
                             } else {
-                                false
+                                self.home.hit_list(mouse.column, mouse.row)
+                                    || self.home.hit_preview(mouse.column, mouse.row)
                             };
                             let handled = match mouse.kind {
-                                MouseEventKind::ScrollUp if hit_scroll_target => self.home.handle_scroll_up(),
-                                MouseEventKind::ScrollDown if hit_scroll_target => self.home.handle_scroll_down(),
+                                MouseEventKind::ScrollUp if hit_scroll_target => {
+                                    self.home.handle_scroll_up(mouse.column, mouse.row)
+                                }
+                                MouseEventKind::ScrollDown if hit_scroll_target => {
+                                    self.home.handle_scroll_down(mouse.column, mouse.row)
+                                }
                                 _ => false,
                             };
                             if handled {
