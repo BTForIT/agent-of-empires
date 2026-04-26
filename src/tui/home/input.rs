@@ -1496,13 +1496,23 @@ impl HomeView {
             KeyCode::Char('O') => {
                 self.apply_sort_order(self.sort_order.cycle());
             }
-            // iPad-friendly ±10 aliases for PageUp/PageDown. iPads have no
-            // Shift+Up / Shift+Down: ±10 navigation. Same step size as
-            // PageUp/PageDown for users on keyboards without those keys.
+            // ±10 navigation: Shift+Up/Down, PageUp/PageDown, OR { / }.
+            // The brace pair is parity-safe — `{` is `Shift+[` and `}` is
+            // `Shift+]` on US layouts, so both bytes arrive identically on
+            // Mac, iPad, iPhone, mosh, ssh — no platform divergence (this
+            // was my mistake to lump them with Ctrl+q in the parity revert).
+            // PageUp/Down rarely exists on iOS soft keyboards; { / } is
+            // the third option that does.
             KeyCode::Up if key.modifiers.contains(KeyModifiers::SHIFT) => {
                 self.move_cursor(-10);
             }
             KeyCode::Down if key.modifiers.contains(KeyModifiers::SHIFT) => {
+                self.move_cursor(10);
+            }
+            KeyCode::Char('{') => {
+                self.move_cursor(-10);
+            }
+            KeyCode::Char('}') => {
                 self.move_cursor(10);
             }
             KeyCode::Up | KeyCode::Char('k') => {
