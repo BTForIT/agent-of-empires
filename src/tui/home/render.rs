@@ -206,23 +206,39 @@ impl HomeView {
             .constraints(constraints)
             .split(area);
 
-        // Layout: left panel (list) and right panel (preview)
-        // On small screens, cap list width so the preview pane gets adequate space
+        // Layout: side-by-side at ≥60 cols, stacked (preview above list) below.
+        // Stacked mode is for iPhone-portrait-zoomed-out / very narrow Mosh viewports
+        // where a 40-col preview minimum + a 10-col list leaves nothing usable.
+        // See design doc: docs/plans/2026-04-25-aoe-responsive-mosh-design.md.
         let available_width = main_chunks[0].width;
-        let effective_list_width = self
-            .list_width
-            .min(available_width.saturating_sub(40))
-            .max(10);
-        let chunks = Layout::default()
-            .direction(Direction::Horizontal)
-            .constraints([
-                Constraint::Length(effective_list_width),
-                Constraint::Min(40),
-            ])
-            .split(main_chunks[0]);
+        const STACKED_BREAKPOINT: u16 = 60;
+        if available_width < STACKED_BREAKPOINT {
+            let main_height = main_chunks[0].height;
+            // List gets ~1/3 of vertical space, clamped to [5, 12]; preview gets the rest.
+            let list_height = (main_height / 3).clamp(5, 12);
+            let stacked = Layout::default()
+                .direction(Direction::Vertical)
+                .constraints([Constraint::Min(8), Constraint::Length(list_height)])
+                .split(main_chunks[0]);
+            self.render_preview(frame, stacked[0], theme);
+            self.render_list(frame, stacked[1], theme);
+        } else {
+            // On small screens, cap list width so the preview pane gets adequate space
+            let effective_list_width = self
+                .list_width
+                .min(available_width.saturating_sub(40))
+                .max(10);
+            let chunks = Layout::default()
+                .direction(Direction::Horizontal)
+                .constraints([
+                    Constraint::Length(effective_list_width),
+                    Constraint::Min(40),
+                ])
+                .split(main_chunks[0]);
 
-        self.render_list(frame, chunks[0], theme);
-        self.render_preview(frame, chunks[1], theme);
+            self.render_list(frame, chunks[0], theme);
+            self.render_preview(frame, chunks[1], theme);
+        }
         self.render_status_bar(frame, main_chunks[1], theme);
 
         if let Some(info) = update_info {
