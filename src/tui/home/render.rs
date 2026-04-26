@@ -312,6 +312,7 @@ impl HomeView {
     }
 
     fn render_list(&mut self, frame: &mut Frame, area: Rect, theme: &Theme) {
+        self.list_area = area;
         let group_suffix = if self.group_by == GroupByMode::Project {
             " (by project)"
         } else {
