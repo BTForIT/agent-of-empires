@@ -2098,19 +2098,23 @@ impl HomeView {
             KeyCode::Char('o') if ctrl => Some(key),
             // Shifted action letters: map to lowercase equivalents
             // N->n (new), X->x (stop), S->s (settings), M->m (message),
-            // T->t (toggle view), C->c (container toggle), Q->q (quit).
+            // T->t (toggle view), C->c (container toggle).
             //
             // `O` is INTENTIONALLY excluded: lowercasing Shift+O to 'o' would
             // collide with bare 'o' (which must fall through to the compose
             // dialog in strict mode — "no destructive lowercase" rule). Let 'O'
             // reach the main match as-is so its own `Char('O')` arm can fire
             // for sort-cycle without ambiguity.
-            KeyCode::Char(c @ ('N' | 'X' | 'S' | 'M' | 'T' | 'C' | 'Q')) if bare || shift_only => {
-                Some(KeyEvent::new(
-                    KeyCode::Char(c.to_ascii_lowercase()),
-                    KeyModifiers::NONE,
-                ))
-            }
+            //
+            // `Q` is INTENTIONALLY excluded: lowercasing Shift+Q to 'q' would
+            // collide with the `Char('q') if !self.strict_hotkeys` guard, which
+            // means strict mode could never quit. Let 'Q' reach the universal
+            // `Char('Q') => Quit` arm directly — same canonical chord across
+            // both modes, and it survives iOS Mosh (where Shift+letter is
+            // stripped down to the bare uppercase keycode without modifier).
+            KeyCode::Char(c @ ('N' | 'X' | 'S' | 'M' | 'T' | 'C')) if bare || shift_only => Some(
+                KeyEvent::new(KeyCode::Char(c.to_ascii_lowercase()), KeyModifiers::NONE),
+            ),
             // D -> d (delete) and R -> r (rename) in strict mode
             // (the original uppercase D=diff and R=serve are now behind Ctrl)
             KeyCode::Char(c @ ('D' | 'R')) if bare || shift_only => Some(KeyEvent::new(
