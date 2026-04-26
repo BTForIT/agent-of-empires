@@ -1570,10 +1570,10 @@ impl HomeView {
                     self.toggle_group_collapsed(&path);
                 }
             }
-            KeyCode::Char('H') => {
+            KeyCode::Char('H') | KeyCode::Char('<') => {
                 self.shrink_list();
             }
-            KeyCode::Char('L') => {
+            KeyCode::Char('L') | KeyCode::Char('>') => {
                 self.grow_list();
             }
             KeyCode::Left | KeyCode::Char('h') => {
@@ -1713,15 +1713,22 @@ impl HomeView {
 
     /// Scroll the preview pane up by one mouse-wheel step. Returns `true` if
     /// the UI should redraw. When the diff view is open, scroll the diff
-    /// content instead.
+    /// content instead. When no session is selected (list pane has focus),
+    /// route the wheel event to list navigation so iOS-Mosh touch-scroll
+    /// can move the cursor (mouse capture would otherwise eat the event
+    /// and the user sees nothing happen).
     pub fn handle_scroll_up(&mut self) -> bool {
         const STEP: u16 = 3;
         if let Some(ref mut diff) = self.diff_view {
             diff.scroll_up(STEP);
             return true;
         }
-        if self.selected_session.is_none() || self.has_dialog() {
+        if self.has_dialog() {
             return false;
+        }
+        if self.selected_session.is_none() {
+            self.move_cursor(-1);
+            return true;
         }
 
         let active_cache = match self.view_mode {
@@ -1760,15 +1767,20 @@ impl HomeView {
 
     /// Scroll the preview pane down by one mouse-wheel step. Returns `true`
     /// if the UI should redraw. When the diff view is open, scroll the diff
-    /// content instead.
+    /// content instead. When no session is selected (list pane has focus),
+    /// route the wheel event to list navigation — see handle_scroll_up.
     pub fn handle_scroll_down(&mut self) -> bool {
         const STEP: u16 = 3;
         if let Some(ref mut diff) = self.diff_view {
             diff.scroll_down(STEP);
             return true;
         }
-        if self.selected_session.is_none() || self.has_dialog() {
+        if self.has_dialog() {
             return false;
+        }
+        if self.selected_session.is_none() {
+            self.move_cursor(1);
+            return true;
         }
         if self.preview_scroll_offset == 0 {
             return false;
