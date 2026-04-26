@@ -1656,8 +1656,7 @@ pub async fn send_message(
             // (and especially when symlinks alias multiple "profiles" to the
             // same on-disk file — the merged list gets written 3x). Original
             // bug: 38 unique sessions appeared 114 times in default/sessions.json.
-            let target_profile =
-                touched_profile.unwrap_or_else(|| state.profile.clone());
+            let target_profile = touched_profile.unwrap_or_else(|| state.profile.clone());
             let profile_snapshot: Vec<Instance> = instances
                 .iter()
                 .filter(|i| i.source_profile == target_profile)
