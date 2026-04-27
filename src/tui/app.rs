@@ -256,12 +256,15 @@ impl App {
                             continue;
                         }
                         Some(Ok(Event::Mouse(mouse))) => {
-                            let hit_scroll_target = if self.home.is_diff_open() {
-                                self.home.hit_diff(mouse.column, mouse.row)
-                            } else {
-                                self.home.hit_list(mouse.column, mouse.row)
-                                    || self.home.hit_preview(mouse.column, mouse.row)
-                            };
+                            let hit_list = self.home.hit_list(mouse.column, mouse.row);
+                            let hit_preview = self.home.hit_preview(mouse.column, mouse.row);
+                            let hit_diff = self.home.is_diff_open()
+                                && self.home.hit_diff(mouse.column, mouse.row);
+                            tracing::debug!(
+                                "mouse evt: kind={:?} col={} row={} hit_list={} hit_preview={} hit_diff={}",
+                                mouse.kind, mouse.column, mouse.row, hit_list, hit_preview, hit_diff
+                            );
+                            let hit_scroll_target = hit_diff || hit_list || hit_preview;
                             let handled = match mouse.kind {
                                 MouseEventKind::ScrollUp if hit_scroll_target => {
                                     self.home.handle_scroll_up(mouse.column, mouse.row)
@@ -271,6 +274,7 @@ impl App {
                                 }
                                 _ => false,
                             };
+                            tracing::debug!("mouse evt handled={}", handled);
                             if handled {
                                 terminal.draw(|f| self.render(f))?;
                             }
