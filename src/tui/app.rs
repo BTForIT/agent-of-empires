@@ -113,9 +113,11 @@ impl App {
             terminal.backend_mut(),
             crossterm::terminal::LeaveAlternateScreen,
             DisableBracketedPaste,
-            DisableMouseCapture,
             crossterm::cursor::Show
         )?;
+        if crate::tui::mouse_capture_requested() {
+            crossterm::execute!(terminal.backend_mut(), DisableMouseCapture)?;
+        }
         std::io::Write::flush(terminal.backend_mut())?;
 
         // Drop the event stream so its background reader releases stdin.
@@ -134,9 +136,11 @@ impl App {
             terminal.backend_mut(),
             crossterm::terminal::EnterAlternateScreen,
             EnableBracketedPaste,
-            EnableMouseCapture,
             crossterm::cursor::Hide
         )?;
+        if crate::tui::mouse_capture_requested() {
+            crossterm::execute!(terminal.backend_mut(), EnableMouseCapture)?;
+        }
         std::io::Write::flush(terminal.backend_mut())?;
 
         terminal.clear()?;
