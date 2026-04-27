@@ -2099,25 +2099,27 @@ impl HomeView {
             }
             // Ctrl+O stays as-is (cycle sort backward, already handled by its own arm)
             KeyCode::Char('o') if ctrl => Some(key),
-            // Shifted action letters: map to lowercase equivalents
-            // N->n (new), X->x (stop), S->s (settings), M->m (message),
-            // T->t (toggle view), C->c (container toggle).
+            // Shifted action letters used to be lowercased here so a single
+            // `Char('letter')` arm could handle both modes. That was a bug:
+            // every target lowercase handler is guarded `if !self.strict_hotkeys`,
+            // so the normalize sent the chord into a dead arm and strict mode
+            // could never reach the action. Each letter has its own
+            // `Char('UPPER') if self.strict_hotkeys` arm that does the right
+            // thing — passing Shift+letter through unchanged lets those arms
+            // fire directly. Affects N (new session), X (stop), S (settings),
+            // M (message), T (toggle view), C (container toggle), Q (quit).
+            // Q was already excluded; the remaining six are now no longer
+            // normalized either.
             //
-            // `O` is INTENTIONALLY excluded: lowercasing Shift+O to 'o' would
-            // collide with bare 'o' (which must fall through to the compose
-            // dialog in strict mode — "no destructive lowercase" rule). Let 'O'
-            // reach the main match as-is so its own `Char('O')` arm can fire
-            // for sort-cycle without ambiguity.
+            // Side benefit: this also makes the chords work on iOS Mosh, where
+            // Shift+letter is delivered as the bare uppercase keycode without
+            // a Shift modifier.
             //
-            // `Q` is INTENTIONALLY excluded: lowercasing Shift+Q to 'q' would
-            // collide with the `Char('q') if !self.strict_hotkeys` guard, which
-            // means strict mode could never quit. Let 'Q' reach the universal
-            // `Char('Q') => Quit` arm directly — same canonical chord across
-            // both modes, and it survives iOS Mosh (where Shift+letter is
-            // stripped down to the bare uppercase keycode without modifier).
-            KeyCode::Char(c @ ('N' | 'X' | 'S' | 'M' | 'T' | 'C')) if bare || shift_only => Some(
-                KeyEvent::new(KeyCode::Char(c.to_ascii_lowercase()), KeyModifiers::NONE),
-            ),
+            // `O` is INTENTIONALLY excluded from any normalize: lowercasing
+            // Shift+O to 'o' would collide with bare 'o' (which must fall
+            // through to the compose dialog in strict mode — "no destructive
+            // lowercase" rule). Let 'O' reach the main match as-is so its own
+            // `Char('O')` arm can fire for sort-cycle without ambiguity.
             // D -> d (delete) and R -> r (rename) in strict mode
             // (the original uppercase D=diff and R=serve are now behind Ctrl)
             KeyCode::Char(c @ ('D' | 'R')) if bare || shift_only => Some(KeyEvent::new(
