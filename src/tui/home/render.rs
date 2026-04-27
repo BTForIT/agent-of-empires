@@ -206,9 +206,11 @@ impl HomeView {
             .constraints(constraints)
             .split(area);
 
-        // Layout: side-by-side at ≥60 cols, stacked (preview above list) below.
+        // Layout: side-by-side at ≥60 cols, stacked (list above preview) below.
         // Stacked mode is for iPhone-portrait-zoomed-out / very narrow Mosh viewports
         // where a 40-col preview minimum + a 10-col list leaves nothing usable.
+        // List on top so navigation context (selected row) stays in the user's eye
+        // line while they read the preview underneath.
         // See design doc: docs/plans/2026-04-25-aoe-responsive-mosh-design.md.
         let available_width = main_chunks[0].width;
         const STACKED_BREAKPOINT: u16 = 60;
@@ -218,10 +220,10 @@ impl HomeView {
             let list_height = (main_height / 3).clamp(5, 12);
             let stacked = Layout::default()
                 .direction(Direction::Vertical)
-                .constraints([Constraint::Min(8), Constraint::Length(list_height)])
+                .constraints([Constraint::Length(list_height), Constraint::Min(8)])
                 .split(main_chunks[0]);
-            self.render_preview(frame, stacked[0], theme);
-            self.render_list(frame, stacked[1], theme);
+            self.render_list(frame, stacked[0], theme);
+            self.render_preview(frame, stacked[1], theme);
         } else {
             // On small screens, cap list width so the preview pane gets adequate space
             let effective_list_width = self
