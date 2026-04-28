@@ -15,6 +15,14 @@ use crate::cli::truncate_id;
 use crate::process;
 use crate::session::Status;
 
+/// Default size when no controlling-terminal size is supplied at session
+/// creation (HTTP API path). tmux defaults `new-session -d` to 80x24, which
+/// combined with per-session `window-size latest` causes iOS Mosh portrait
+/// clients (~50x24 with on-screen keyboard up) to wedge sessions at that
+/// size after detach. Comfortable headless default; any narrower client
+/// shrinks via `latest` on attach.
+const DEFAULT_HEADLESS_SIZE: (u16, u16) = (240, 80);
+
 pub struct Session {
     name: String,
 }
@@ -68,7 +76,8 @@ impl Session {
             return Ok(());
         }
 
-        let mut args = build_create_args(&self.name, working_dir, command, size);
+        let effective_size = size.or(Some(DEFAULT_HEADLESS_SIZE));
+        let mut args = build_create_args(&self.name, working_dir, command, effective_size);
         append_remain_on_exit_args(&mut args, &self.name);
         append_pane_base_index_args(&mut args, &self.name);
         append_mouse_on_args(&mut args, &self.name);
