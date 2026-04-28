@@ -23,6 +23,26 @@ use crate::session::Status;
 /// shrinks via `latest` on attach.
 const DEFAULT_HEADLESS_SIZE: (u16, u16) = (240, 80);
 
+/// Minimum width/height below which we treat the reported terminal size
+/// as a wedge sentinel (pipe contexts return Some((80, 24)) from
+/// crossterm; iOS Mosh portrait reports ~50x24) and substitute
+/// DEFAULT_HEADLESS_SIZE. Real attached terminals are virtually always
+/// at least 120x40; anything smaller is almost certainly a non-TTY
+/// shell or a phone client, neither of which wants creation pinned at
+/// the reported wedge dims.
+const MIN_REAL_TERMINAL_SIZE: (u16, u16) = (120, 40);
+
+/// Resolves the size we should pass to `tmux new-session -x/-y`. None or
+/// any size below MIN_REAL_TERMINAL_SIZE is treated as a wedge and
+/// substituted with DEFAULT_HEADLESS_SIZE. Extracted so the threshold
+/// logic is testable without a tmux fixture.
+fn effective_creation_size(size: Option<(u16, u16)>) -> (u16, u16) {
+    match size {
+        Some((w, h)) if w >= MIN_REAL_TERMINAL_SIZE.0 && h >= MIN_REAL_TERMINAL_SIZE.1 => (w, h),
+        _ => DEFAULT_HEADLESS_SIZE,
+    }
+}
+
 pub struct Session {
     name: String,
 }
@@ -76,7 +96,7 @@ impl Session {
             return Ok(());
         }
 
-        let effective_size = size.or(Some(DEFAULT_HEADLESS_SIZE));
+        let effective_size = Some(effective_creation_size(size));
         let mut args = build_create_args(&self.name, working_dir, command, effective_size);
         append_remain_on_exit_args(&mut args, &self.name);
         append_pane_base_index_args(&mut args, &self.name);
@@ -933,6 +953,41 @@ mod tests {
 
         // Command should be last
         assert_eq!(args.last().unwrap(), "claude");
+    }
+
+    #[test]
+    fn test_effective_creation_size_substitutes_default_for_wedge_inputs() {
+        // None → default (HTTP API path).
+        assert_eq!(effective_creation_size(None), DEFAULT_HEADLESS_SIZE);
+        // Pipe wedge: crossterm reports Some((80, 24)) on non-TTY stdin/stdout.
+        assert_eq!(
+            effective_creation_size(Some((80, 24))),
+            DEFAULT_HEADLESS_SIZE
+        );
+        // iOS Mosh portrait wedge.
+        assert_eq!(
+            effective_creation_size(Some((50, 24))),
+            DEFAULT_HEADLESS_SIZE
+        );
+        // Just below threshold on either axis still substitutes.
+        assert_eq!(
+            effective_creation_size(Some((119, 40))),
+            DEFAULT_HEADLESS_SIZE
+        );
+        assert_eq!(
+            effective_creation_size(Some((120, 39))),
+            DEFAULT_HEADLESS_SIZE
+        );
+    }
+
+    #[test]
+    fn test_effective_creation_size_passes_through_real_terminals() {
+        // At threshold — kept as reported.
+        assert_eq!(effective_creation_size(Some((120, 40))), (120, 40));
+        // Typical desktop terminal — kept.
+        assert_eq!(effective_creation_size(Some((180, 50))), (180, 50));
+        // Large terminal — kept.
+        assert_eq!(effective_creation_size(Some((300, 100))), (300, 100));
     }
 
     #[test]
