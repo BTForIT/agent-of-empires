@@ -212,6 +212,7 @@ pub async fn run(profile: &str, args: AddArgs) -> Result<()> {
     };
 
     let mut instance = Instance::new(&final_title, path.to_str().unwrap_or(""));
+    instance.source_profile = profile.to_string();
 
     if let Some(group) = &group_path {
         instance.group_path = group.trim().to_string();
@@ -476,11 +477,8 @@ pub async fn run(profile: &str, args: AddArgs) -> Result<()> {
     } else {
         println!();
         println!("Next steps:");
-        println!(
-            "  agent-of-empires session start {}   # Start the session",
-            final_title
-        );
-        println!("  agent-of-empires                         # Open TUI and press Enter to attach");
+        println!("  aoe session start {}   # Start the session", final_title);
+        println!("  aoe                         # Open TUI and press Enter to attach");
     }
 
     Ok(())

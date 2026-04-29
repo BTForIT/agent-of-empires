@@ -29,7 +29,7 @@ use super::dialogs::ServeView;
 use super::dialogs::{
     ChangelogDialog, ConfirmDialog, GroupDeleteOptionsDialog, HookTrustDialog, HooksInstallDialog,
     InfoDialog, NewSessionData, NewSessionDialog, NoAgentsDialog, ProfilePickerDialog,
-    RenameDialog, SnoozeDurationDialog, UnifiedDeleteDialog, WelcomeDialog,
+    RenameDialog, SnoozeDurationDialog, UnifiedDeleteDialog, UpdateConfirmDialog, WelcomeDialog,
 };
 use super::diff::DiffView;
 use super::settings::SettingsView;
@@ -172,6 +172,7 @@ pub struct HomeView {
     pub(super) profile_picker_dialog: Option<ProfilePickerDialog>,
     #[cfg(feature = "serve")]
     pub(super) serve_view: Option<ServeView>,
+    pub(super) update_confirm_dialog: Option<UpdateConfirmDialog>,
     pub(super) send_message_dialog: Option<super::dialogs::SendMessageDialog>,
     /// Session to receive the message from the send dialog
     pub(super) pending_send_session: Option<String>,
@@ -372,6 +373,7 @@ impl HomeView {
             profile_picker_dialog: None,
             #[cfg(feature = "serve")]
             serve_view: None,
+            update_confirm_dialog: None,
             send_message_dialog: None,
             pending_send_session: None,
             pending_paste: None,
@@ -426,6 +428,75 @@ impl HomeView {
             let _ = view.save();
         }
 
+        // Batch-sync instance IDs and captured session IDs to tmux hidden env
+        // so that build_exclusion_set() on other AoE instances can see them.
+        {
+            let mut set_batch: Vec<(String, String, String)> = Vec::new();
+            let mut unset_batch: Vec<(String, String)> = Vec::new();
+            for inst in &view.instances {
+                let tmux_name = match inst.tmux_session() {
+                    Ok(s) if s.exists() && !s.is_pane_dead() => s.name().to_string(),
+                    _ => continue,
+                };
+
+                set_batch.push((
+                    tmux_name.clone(),
+                    crate::tmux::env::AOE_INSTANCE_ID_KEY.to_string(),
+                    inst.id.clone(),
+                ));
+                if let Some(ref sid) = inst.agent_session_id {
+                    set_batch.push((
+                        tmux_name,
+                        crate::tmux::env::AOE_CAPTURED_SESSION_ID_KEY.to_string(),
+                        sid.clone(),
+                    ));
+                } else {
+                    unset_batch.push((
+                        tmux_name,
+                        crate::tmux::env::AOE_CAPTURED_SESSION_ID_KEY.to_string(),
+                    ));
+                }
+            }
+            if !set_batch.is_empty() {
+                let batch_refs: Vec<(&str, &str, &str)> = set_batch
+                    .iter()
+                    .map(|(s, k, v)| (s.as_str(), k.as_str(), v.as_str()))
+                    .collect();
+                if let Err(e) = crate::tmux::env::set_hidden_env_batch(&batch_refs) {
+                    tracing::warn!("Batch env sync failed: {}", e);
+                }
+            }
+            if !unset_batch.is_empty() {
+                let batch_refs: Vec<(&str, &str)> = unset_batch
+                    .iter()
+                    .map(|(s, k)| (s.as_str(), k.as_str()))
+                    .collect();
+                if let Err(e) = crate::tmux::env::remove_hidden_env_batch(&batch_refs) {
+                    tracing::warn!("Batch env unset failed: {}", e);
+                }
+            }
+        }
+
+        // Recover session IDs for pre-existing sessions via pollers.
+        for inst in &mut view.instances {
+            let has_live_tmux = inst
+                .tmux_session()
+                .map(|s| s.exists() && !s.is_pane_dead())
+                .unwrap_or(false);
+            if !has_live_tmux {
+                continue;
+            }
+
+            if inst.supports_session_poller() && inst.session_id_poller.is_none() {
+                inst.maybe_start_poller();
+            }
+        }
+        view.instance_map = view
+            .instances
+            .iter()
+            .map(|i| (i.id.clone(), i.clone()))
+            .collect();
+
         view.flat_items = view.build_flat_items();
         view.update_selected();
         Ok(view)
@@ -456,6 +527,14 @@ impl HomeView {
                     inst.last_error = prev.last_error.clone();
                     inst.last_error_check = prev.last_error_check;
                     inst.last_start_time = prev.last_start_time;
+                    inst.session_id_poller = prev.session_id_poller.clone();
+                    // Use in-memory session_id if present; fallback to disk.
+                    // In-memory state takes priority over disk: the poller
+                    // may have updated the ID since last save.
+                    inst.agent_session_id = prev
+                        .agent_session_id
+                        .clone()
+                        .or(inst.agent_session_id.take());
                 }
             }
             // Rebuild this profile's tree from disk, preserving any collapsed
@@ -619,6 +698,56 @@ impl HomeView {
             return true;
         }
         false
+    }
+
+    /// Apply any pending session ID updates from background pollers.
+    /// Returns true if any instance was updated.
+    pub fn apply_session_id_updates(&mut self) -> bool {
+        let mut updates: Vec<(String, String)> = Vec::new();
+
+        for inst in &self.instances {
+            if let Some((_id, session_id)) = inst
+                .session_id_poller
+                .as_ref()
+                .and_then(|p| p.lock().ok())
+                .and_then(|p| p.try_recv_session_update())
+            {
+                let Some(session_id) = crate::session::capture::validated_session_id(session_id)
+                else {
+                    continue;
+                };
+                if inst.agent_session_id.as_deref() != Some(session_id.as_str()) {
+                    updates.push((inst.id.clone(), session_id));
+                }
+                continue;
+            }
+        }
+
+        if !updates.is_empty() {
+            let prev: Vec<(String, Option<String>)> = updates
+                .iter()
+                .filter_map(|(id, _)| {
+                    self.get_instance(id)
+                        .map(|inst| (id.clone(), inst.agent_session_id.clone()))
+                })
+                .collect();
+
+            for (id, session_id) in &updates {
+                self.mutate_instance(id, |inst| {
+                    inst.agent_session_id = Some(session_id.clone());
+                });
+            }
+            if let Err(e) = self.save() {
+                tracing::error!("Failed to save after session ID update: {}", e);
+                for (id, old_val) in &prev {
+                    self.mutate_instance(id, |inst| {
+                        inst.agent_session_id = old_val.clone();
+                    });
+                }
+                return false;
+            }
+        }
+        !updates.is_empty()
     }
 
     /// Request background session creation. Used for sandbox sessions to avoid blocking UI.
@@ -963,6 +1092,25 @@ impl HomeView {
         changed
     }
 
+    /// Whether the user is currently looking at a surface where they're
+    /// likely to want to copy text (URLs, error messages, release notes).
+    /// The App uses this to release xterm mouse capture so the terminal's
+    /// native drag-to-select works without a modifier; mouse capture comes
+    /// back as soon as the surface is dismissed.
+    ///
+    /// Add new dialogs here only when their content is meant to be copied,
+    /// not for every modal: capture toggling has a small but visible cost
+    /// (the wheel-scroll on the dashboard preview won't work while it's
+    /// off).
+    pub fn wants_text_selection(&self) -> bool {
+        #[cfg(feature = "serve")]
+        let serve_open = self.serve_view.is_some();
+        #[cfg(not(feature = "serve"))]
+        let serve_open = false;
+
+        serve_open || self.info_dialog.is_some() || self.changelog_dialog.is_some()
+    }
+
     pub fn has_dialog(&self) -> bool {
         #[cfg(feature = "serve")]
         let serve_open = self.serve_view.is_some();
@@ -985,6 +1133,7 @@ impl HomeView {
             || self.snooze_duration_dialog.is_some()
             || self.profile_picker_dialog.is_some()
             || self.send_message_dialog.is_some()
+            || self.update_confirm_dialog.is_some()
             || serve_open
             || self.settings_view.is_some()
             || self.diff_view.is_some()
@@ -1312,6 +1461,15 @@ impl HomeView {
         self.try_mutate_instance(id, |inst| inst.start_terminal_with_size(size))?;
         self.save()?;
         Ok(())
+    }
+
+    pub fn restart_instance_with_size_opts(
+        &mut self,
+        id: &str,
+        size: Option<(u16, u16)>,
+        skip_on_launch: bool,
+    ) -> anyhow::Result<()> {
+        self.try_mutate_instance(id, |inst| inst.restart_with_size_opts(size, skip_on_launch))
     }
 
     pub fn select_session_by_id(&mut self, session_id: &str) {
