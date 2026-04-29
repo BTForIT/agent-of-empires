@@ -473,11 +473,13 @@ impl App {
                             continue;
                         }
                         Some(Ok(Event::Resize(_, _))) => {
-                            // Mosh / iOS keyboard slide / window resize:
-                            // ratatui's Terminal autosizes on draw, so trigger
-                            // an immediate redraw — without this, the previous
-                            // viewport's layout stays painted and the bottom
-                            // rows render off-screen on iPad / iPhone clients.
+                            // Soft keyboard slides up/down on iPad/iPhone Mosh
+                            // (and ordinary terminal resizes) emit Resize. The
+                            // catch-all below would silently drop them, leaving
+                            // the screen mid-stale until the next refresh tick.
+                            // Sync the backend's internal size + redraw now so
+                            // viewport-driven layout (responsive::dialog_width,
+                            // STACKED_BREAKPOINT, etc.) re-evaluates.
                             terminal.autoresize()?;
                             terminal.draw(|f| self.render(f))?;
                             continue;
