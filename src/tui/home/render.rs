@@ -14,6 +14,7 @@ use super::{
 use crate::session::config::GroupByMode;
 use crate::session::{Item, Status};
 use crate::tui::components::{HelpOverlay, Preview};
+use crate::tui::responsive;
 use crate::tui::styles::Theme;
 use crate::update::UpdateInfo;
 
@@ -207,35 +208,35 @@ impl HomeView {
             .constraints(constraints)
             .split(area);
 
-        // Layout: side-by-side at ≥60 cols, stacked (list above preview) below.
-        // Stacked mode is for iPhone-portrait-zoomed-out / very narrow Mosh viewports
-        // where a 40-col preview minimum + a 10-col list leaves nothing usable.
-        // List on top so navigation context (selected row) stays in the user's eye
-        // line while they read the preview underneath.
-        // See design doc: docs/plans/2026-04-25-aoe-responsive-mosh-design.md.
+        // Below STACKED_BREAKPOINT (60 cols), put the list above the preview
+        // instead of side-by-side — iPhone-portrait Mosh zoomed out is ~50
+        // cols, where a 40-col preview floor leaves no usable list width.
         let available_width = main_chunks[0].width;
-        const STACKED_BREAKPOINT: u16 = 60;
-        if available_width < STACKED_BREAKPOINT {
+        if available_width < responsive::STACKED_BREAKPOINT {
             let main_height = main_chunks[0].height;
-            // List gets ~1/3 of vertical space, clamped to [5, 12]; preview gets the rest.
-            let list_height = (main_height / 3).clamp(5, 12);
-            let stacked = Layout::default()
+            let list_height = responsive::stacked_list_height(main_height);
+            let chunks = Layout::default()
                 .direction(Direction::Vertical)
-                .constraints([Constraint::Length(list_height), Constraint::Min(8)])
+                .constraints([
+                    Constraint::Length(list_height),
+                    Constraint::Min(responsive::STACKED_PREVIEW_MIN),
+                ])
                 .split(main_chunks[0]);
-            self.render_list(frame, stacked[0], theme);
-            self.render_preview(frame, stacked[1], theme);
+
+            self.render_list(frame, chunks[0], theme);
+            self.render_preview(frame, chunks[1], theme);
         } else {
-            // On small screens, cap list width so the preview pane gets adequate space
+            // Side-by-side: cap list width so the preview pane keeps its
+            // usability floor (PREVIEW_MIN_WIDTH).
             let effective_list_width = self
                 .list_width
-                .min(available_width.saturating_sub(40))
+                .min(available_width.saturating_sub(responsive::PREVIEW_MIN_WIDTH))
                 .max(10);
             let chunks = Layout::default()
                 .direction(Direction::Horizontal)
                 .constraints([
                     Constraint::Length(effective_list_width),
-                    Constraint::Min(40),
+                    Constraint::Min(responsive::PREVIEW_MIN_WIDTH),
                 ])
                 .split(main_chunks[0]);
 
@@ -1102,10 +1103,12 @@ impl HomeView {
         let strict = self.strict_hotkeys;
 
         // Priority-tagged shortcut groups. Lower priority = kept longer when
-        // the terminal is narrow (iPhone Moshi landscape ~80 cols). Essentials
-        // (Nav / Enter / Help / Quit / Serve indicator) survive first; Batch,
-        // Search, Diff, Mode drop first. Groups render in the declared order;
-        // a │ separator is inserted between kept groups at render time.
+        // the terminal is narrow (iPhone Mosh landscape is ~80 cols, where
+        // the full label set used to truncate Help/Quit). Essentials
+        // (Nav / Enter / Help / Quit / Serve indicator) survive first;
+        // Batch / Search / Diff / Mode drop first. Groups render in the
+        // declared order; a │ separator is inserted between kept groups
+        // at render time.
         let mk = |key: &str, desc: &str| -> Vec<Span<'static>> {
             vec![
                 Span::styled(format!(" {}", key), key_style),
@@ -1115,6 +1118,10 @@ impl HomeView {
 
         let mut groups: Vec<(u8, Vec<Span<'static>>)> = Vec::new();
 
+        // Serve indicator: shown only when the `aoe serve` daemon is live.
+        // The TUI does not own the daemon, so we probe the PID file each
+        // render. Mode comes from a PID-keyed cache so we don't read the
+        // serve.mode file from disk on every frame.
         #[cfg(feature = "serve")]
         {
             let mode_label = crate::cli::serve::cached_serve_mode_label();
@@ -1151,6 +1158,7 @@ impl HomeView {
         groups.push((2, mk(if strict { "T" } else { "t" }, "View")));
         groups.push((3, mk(if strict { "^G" } else { "g" }, "Group")));
 
+        // c: container/host toggle hint for sandboxed sessions in Terminal view
         if self.view_mode == ViewMode::Terminal {
             if let Some(id) = &self.selected_session {
                 if let Some(inst) = self.get_instance(id) {
@@ -1187,8 +1195,8 @@ impl HomeView {
         groups.push((4, mk(if strict { "^D" } else { "D" }, "Diff")));
         // Mouse capture is enabled globally, which disables the terminal's
         // native drag-to-select. Surface the modifier-key workaround so users
-        // don't think copy-paste is broken. Moderate priority — useful but not
-        // critical, drops on narrow panes before ? / Quit.
+        // don't think copy-paste is broken. Moderate priority, useful but not
+        // critical; drops on narrow panes before ? / Quit.
         groups.push((2, mk("\u{2325}/Shift+drag", "Select")));
         groups.push((0, mk("?", "Help")));
         groups.push((0, mk(if strict { "Q" } else { "q" }, "Quit")));

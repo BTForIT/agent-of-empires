@@ -6,6 +6,7 @@ use ratatui::widgets::*;
 use ratatui_textarea::TextArea;
 
 use super::DialogResult;
+use crate::tui::responsive;
 use crate::tui::styles::Theme;
 
 pub struct SendMessageDialog {
@@ -72,17 +73,7 @@ impl SendMessageDialog {
         // keyboard if Event::Resize lands mid-render.
         let content_lines = self.text_area.lines().len() as u16;
         let height = (content_lines + 2).clamp(3, 12).min(area.height.max(3));
-        // 80% of viewport, capped at 80 cols to avoid sprawl, floored at 26
-        // so the bottom hints (" Enter send Esc cancel ") stay legible.
-        // Below 26 cols (iPhone-portrait Mosh w/ keyboard) take the full
-        // viewport — content truncates but the dialog stays visible.
-        let dialog_width = if area.width <= 26 {
-            area.width
-        } else {
-            ((area.width as u32 * 80 / 100) as u16)
-                .clamp(26, 80)
-                .min(area.width)
-        };
+        let dialog_width = responsive::dialog_width(area.width);
         let dialog_area = super::centered_rect(area, dialog_width, height);
 
         frame.render_widget(Clear, dialog_area);
