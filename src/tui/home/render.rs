@@ -524,6 +524,13 @@ impl HomeView {
                                 Status::Deleting => ICON_DELETING,
                                 Status::Creating => spinner_starting(&inst.created_at),
                             };
+                            // Archive/snooze kills the live spinner. A shelved
+                            // session's underlying status (Running/Waiting/...)
+                            // is noise; an animated row reads as "still alive"
+                            // and pulls the eye away from real attention items.
+                            if inst.is_archived() || inst.is_snoozed() {
+                                icon = ICON_STOPPED;
+                            }
                             let color = match inst.status {
                                 Status::Running => theme.running,
                                 Status::Waiting => theme.waiting,
