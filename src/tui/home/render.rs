@@ -511,7 +511,7 @@ impl HomeView {
                 if let Some(inst) = self.get_instance(id) {
                     match self.view_mode {
                         ViewMode::Agent => {
-                            let icon = match inst.status {
+                            let mut icon = match inst.status {
                                 Status::Running => spinner_running(&inst.created_at),
                                 Status::Waiting => spinner_waiting(&inst.created_at),
                                 Status::Idle => ICON_IDLE,
@@ -522,6 +522,13 @@ impl HomeView {
                                 Status::Deleting => ICON_DELETING,
                                 Status::Creating => spinner_starting(&inst.created_at),
                             };
+                            // Archive/snooze kills the live spinner. A shelved
+                            // session's underlying status (Running/Waiting/...)
+                            // is noise; an animated row reads as "still alive"
+                            // and pulls the eye away from real attention items.
+                            if inst.is_archived() || inst.is_snoozed() {
+                                icon = ICON_STOPPED;
+                            }
                             let color = match inst.status {
                                 Status::Running => theme.running,
                                 Status::Waiting => theme.waiting,
