@@ -158,6 +158,7 @@ impl HomeView {
         area: Rect,
         theme: &Theme,
         update_info: Option<&UpdateInfo>,
+        update_status: Option<&str>,
     ) {
         // Settings view takes over the whole screen
         if let Some(ref mut settings) = self.settings_view {
@@ -244,7 +245,7 @@ impl HomeView {
         self.render_status_bar(frame, main_chunks[1], theme);
 
         if let Some(info) = update_info {
-            self.render_update_bar(frame, main_chunks[2], theme, info);
+            self.render_update_bar(frame, main_chunks[2], theme, info, update_status);
         }
 
         // Render dialogs on top
@@ -282,6 +283,7 @@ impl HomeView {
             snooze_duration_dialog,
             profile_picker_dialog,
             send_message_dialog,
+            update_confirm_dialog,
         );
     }
 
@@ -364,7 +366,7 @@ impl HomeView {
                 Line::from("No sessions yet").style(Style::default().fg(theme.dimmed)),
                 Line::from(""),
                 Line::from("Press 'n' to create one").style(Style::default().fg(theme.hint)),
-                Line::from("or 'agent-of-empires add .'").style(Style::default().fg(theme.hint)),
+                Line::from("or 'aoe add .'").style(Style::default().fg(theme.hint)),
             ];
             let para = Paragraph::new(empty_text).alignment(Alignment::Center);
             frame.render_widget(para, inner);
@@ -1241,12 +1243,23 @@ impl HomeView {
         frame.render_widget(status, area);
     }
 
-    fn render_update_bar(&self, frame: &mut Frame, area: Rect, theme: &Theme, info: &UpdateInfo) {
+    fn render_update_bar(
+        &self,
+        frame: &mut Frame,
+        area: Rect,
+        theme: &Theme,
+        info: &UpdateInfo,
+        status: Option<&str>,
+    ) {
         let update_style = Style::default().fg(theme.waiting).bold();
-        let text = format!(
-            " update available {} -> {}",
-            info.current_version, info.latest_version
-        );
+        let text = if let Some(s) = status {
+            format!(" {s}  [Ctrl+x] dismiss")
+        } else {
+            format!(
+                " update available {} → {}  [u] update  [Ctrl+x] dismiss",
+                info.current_version, info.latest_version
+            )
+        };
         let bar = Paragraph::new(Line::from(Span::styled(text, update_style)))
             .style(Style::default().bg(theme.selection));
         frame.render_widget(bar, area);

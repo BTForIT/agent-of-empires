@@ -36,7 +36,11 @@ impl HomeView {
         self.list_area.contains(Position::from((col, row)))
     }
 
-    pub fn handle_key(&mut self, key: KeyEvent) -> Option<Action> {
+    pub fn handle_key(
+        &mut self,
+        key: KeyEvent,
+        update_info: Option<&crate::update::UpdateInfo>,
+    ) -> Option<Action> {
         // Handle unsaved changes confirmation for settings (shown over settings view)
         if self.settings_close_confirm {
             if let Some(dialog) = &mut self.confirm_dialog {
@@ -543,6 +547,23 @@ impl HomeView {
                             }
                         }
                     }
+                }
+            }
+            return None;
+        }
+
+        if let Some(dialog) = &mut self.update_confirm_dialog {
+            use crate::tui::dialogs::DialogResult;
+            match dialog.handle_key(key) {
+                DialogResult::Continue => {}
+                DialogResult::Cancel => {
+                    self.update_confirm_dialog = None;
+                }
+                DialogResult::Submit(()) => {
+                    let method = dialog.method.clone();
+                    let version = dialog.latest_version.clone();
+                    self.update_confirm_dialog = None;
+                    return Some(Action::SpawnUpdate(method, version));
                 }
             }
             return None;
@@ -1075,6 +1096,50 @@ impl HomeView {
                     }
                 }
             }
+            KeyCode::Char('u') => {
+                if let Some(info) = update_info {
+                    if info.available && self.update_confirm_dialog.is_none() {
+                        let method = match crate::update::install::detect_install_method() {
+                            Ok(m) => m,
+                            Err(e) => {
+                                tracing::warn!("update detection failed: {e}");
+                                return None;
+                            }
+                        };
+                        use crate::update::install::InstallMethod;
+                        if !matches!(
+                            &method,
+                            InstallMethod::Homebrew | InstallMethod::Tarball { .. }
+                        ) {
+                            let msg = match &method {
+                                InstallMethod::Nix => {
+                                    "Nix install: run `nix run github:njbrake/agent-of-empires` to update".to_string()
+                                }
+                                InstallMethod::Cargo => {
+                                    "Cargo install: run `cargo install --git https://github.com/njbrake/agent-of-empires aoe`".to_string()
+                                }
+                                InstallMethod::Unknown { .. } => {
+                                    "Unknown install method: run `aoe update` in a terminal for instructions".to_string()
+                                }
+                                _ => unreachable!(),
+                            };
+                            return Some(Action::SetTransientStatus(msg));
+                        }
+                        let needs_sudo = matches!(
+                            &method,
+                            InstallMethod::Tarball { binary_path }
+                                if !crate::update::install::parent_is_writable(binary_path)
+                        );
+                        self.update_confirm_dialog =
+                            Some(crate::tui::dialogs::UpdateConfirmDialog::new(
+                                info.current_version.clone(),
+                                info.latest_version.clone(),
+                                method,
+                                needs_sudo,
+                            ));
+                    }
+                }
+            }
             KeyCode::Char('D') if !self.strict_hotkeys => {
                 // Open diff view - requires a selected session
                 let Some(session_id) = &self.selected_session else {
@@ -1570,6 +1635,9 @@ impl HomeView {
                     }
                 }
             }
+            KeyCode::Char('w') => {
+                self.jump_to_next_waiting();
+            }
             // Strict-mode typing guard: any bare lowercase letter that isn't a
             // navigation key (j/k/h/l) is treated as inadvertent typing — open
             // the compose dialog pre-filled with that character instead of
@@ -1585,6 +1653,73 @@ impl HomeView {
         }
 
         None
+    }
+
+    fn jump_to_next_waiting(&mut self) {
+        let len = self.flat_items.len();
+        if len == 0 {
+            return;
+        }
+
+        // Pass 1: forward-walk from cursor+1, wrapping, for the next Waiting session.
+        let start = (self.cursor + 1) % len;
+        for i in 0..len - 1 {
+            let idx = (start + i) % len;
+            let id = match self.flat_items.get(idx) {
+                Some(Item::Session { id, .. }) => id.clone(),
+                _ => continue,
+            };
+            if let Some(inst) = self.get_instance(&id) {
+                if inst.status == Status::Waiting {
+                    self.cursor = idx;
+                    self.update_selected();
+                    return;
+                }
+            }
+        }
+
+        // Pass 2: fall back to the most-recently-accessed Idle session, skipping
+        // the cursor. Sessions never attached (last_accessed_at == None) rank
+        // last but remain eligible.
+        let mut best: Option<(usize, Option<chrono::DateTime<chrono::Utc>>)> = None;
+        for idx in 0..len {
+            if idx == self.cursor {
+                continue;
+            }
+            let id = match self.flat_items.get(idx) {
+                Some(Item::Session { id, .. }) => id.clone(),
+                _ => continue,
+            };
+            let Some(inst) = self.get_instance(&id) else {
+                continue;
+            };
+            if inst.status != Status::Idle {
+                continue;
+            }
+            let ts = inst.last_accessed_at;
+            let beats = match best {
+                None => true,
+                Some((_, b)) => match (ts, b) {
+                    (Some(a), Some(b)) => a > b,
+                    (Some(_), None) => true,
+                    (None, _) => false,
+                },
+            };
+            if beats {
+                best = Some((idx, ts));
+            }
+        }
+
+        if let Some((idx, _)) = best {
+            self.cursor = idx;
+            self.update_selected();
+            return;
+        }
+
+        self.info_dialog = Some(InfoDialog::new(
+            "No Available Sessions",
+            "No sessions are currently waiting or idle.",
+        ));
     }
 
     pub(super) fn move_cursor(&mut self, delta: i32) {

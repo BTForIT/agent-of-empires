@@ -12,6 +12,12 @@ import { BackToLiveButton } from "./BackToLiveButton";
 import { KeyboardFab } from "./KeyboardFab";
 import { ensureSession } from "../lib/api";
 import type { SessionResponse } from "../lib/types";
+import {
+  FOCUS_TERMINAL_EVENT,
+  consumePendingTerminalFocus,
+  setPendingTerminalFocus,
+  type FocusTerminalDetail,
+} from "../lib/terminalFocus";
 import "@wterm/dom/css";
 
 interface Props {
@@ -36,7 +42,12 @@ export function TerminalView({ session }: Props) {
     exitScrollback,
     ctrlActiveRef,
     clearCtrlRef,
-  } = useTerminal(ensureState === "ready" ? session.id : null);
+  } = useTerminal(
+    ensureState === "ready" ? session.id : null,
+    "ws",
+    true,
+    session.claude_fullscreen,
+  );
   const { isMobile, keyboardOpen, keyboardHeight } = useMobileKeyboard();
   const [ctrlActive, setCtrlActive] = useState(false);
   const [termFocused, setTermFocused] = useState(false);
@@ -134,6 +145,78 @@ export function TerminalView({ session }: Props) {
       cancelAnimationFrame(scrollRafRef.current);
     };
   }, [keyboardHeight, keyboardOpen, termRef]);
+
+  // wterm sometimes resets scrollTop=0 mid-session when its renderer
+  // redraws (observed on backspace), and its post-render scroll-to-
+  // bottom skips because _isScrolledToBottom() reads stale dimensions
+  // on the same task. Result: scrollHeight grows past clientHeight
+  // while scrollTop stays at 0, so the cursor falls below the visible
+  // region until the next keyboard open/close kicks the fix above.
+  //
+  // The reset fires a scroll event, so listen at document level
+  // (capture phase, since scroll events don't bubble) and resolve
+  // termRef.current.element at scroll time. State.connected can flip
+  // true before wterm finishes init, and the scroll's target may be a
+  // descendant of wterm's root, so attach-time element resolution
+  // misses both cases. The rAF debounce lets wterm's own scroll
+  // handler flip isInScrollback first when the user actually scrolls,
+  // so we don't fight legitimate scrollback entry.
+  const isInScrollbackRef = useRef(state.isInScrollback);
+  useEffect(() => {
+    isInScrollbackRef.current = state.isInScrollback;
+  }, [state.isInScrollback]);
+  useEffect(() => {
+    let raf = 0;
+    const onScroll = (e: Event) => {
+      const el = termRef.current?.element;
+      if (!el) return;
+      const target = e.target as Node | null;
+      if (target !== el && !(target && el.contains(target))) return;
+      cancelAnimationFrame(raf);
+      raf = requestAnimationFrame(() => {
+        if (isInScrollbackRef.current) return;
+        const elNow = termRef.current?.element;
+        if (!elNow) return;
+        const max = Math.max(0, elNow.scrollHeight - elNow.clientHeight);
+        if (elNow.scrollTop < max - 1) {
+          elNow.scrollTop = elNow.scrollHeight;
+        }
+      });
+    };
+    document.addEventListener("scroll", onScroll, { passive: true, capture: true });
+    return () => {
+      document.removeEventListener("scroll", onScroll, true);
+      cancelAnimationFrame(raf);
+    };
+  }, [termRef]);
+
+  // Returns true if focus was applied. Mirrors PairedTerminal so the same
+  // pending-latch fallback covers both terminals when the wterm hasn't
+  // mounted yet (ensureSession round-trip on a fresh session).
+  const focusSelf = useCallback(() => {
+    const ta = termRef.current?.element.querySelector("textarea");
+    if (ta instanceof HTMLElement) {
+      ta.focus();
+      return true;
+    }
+    return false;
+  }, [termRef]);
+
+  // Cmd+` shortcut focuses this terminal when "agent" is the dispatched target.
+  useEffect(() => {
+    const onFocusEvent = (e: Event) => {
+      const detail = (e as CustomEvent<FocusTerminalDetail>).detail;
+      if (detail?.target !== "agent") return;
+      if (!focusSelf()) setPendingTerminalFocus("agent");
+    };
+    window.addEventListener(FOCUS_TERMINAL_EVENT, onFocusEvent);
+    return () => window.removeEventListener(FOCUS_TERMINAL_EVENT, onFocusEvent);
+  }, [focusSelf]);
+
+  useEffect(() => {
+    if (ensureState !== "ready") return;
+    if (consumePendingTerminalFocus("agent")) focusSelf();
+  }, [ensureState, focusSelf]);
 
   // On initial connect, auto-open the keyboard.
   useEffect(() => {
@@ -239,6 +322,7 @@ export function TerminalView({ session }: Props) {
       )}
 
       <div
+        data-term="agent"
         className={`flex-1 overflow-hidden bg-surface-950 relative md:rounded-lg term-panel${termFocused ? " term-focused" : ""}`}
         onFocus={() => setTermFocused(true)}
         onBlur={() => setTermFocused(false)}

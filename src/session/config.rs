@@ -420,9 +420,6 @@ pub struct UpdatesConfig {
     #[serde(default = "default_true")]
     pub check_enabled: bool,
 
-    #[serde(default)]
-    pub auto_update: bool,
-
     #[serde(default = "default_check_interval")]
     pub check_interval_hours: u64,
 
@@ -434,7 +431,6 @@ impl Default for UpdatesConfig {
     fn default() -> Self {
         Self {
             check_enabled: true,
-            auto_update: false,
             check_interval_hours: 24,
             notify_in_cli: true,
         }
@@ -728,6 +724,18 @@ pub fn resolve_default_profile() -> String {
         .unwrap_or_else(|_| "default".to_string())
 }
 
+/// Return `profile` if non-empty, otherwise the user's globally configured
+/// default profile. Used at start-time config-resolution sites that prefer
+/// an instance's `source_profile` but tolerate it being unset (e.g. tests
+/// or pre-`source_profile`-wiring callers).
+pub fn effective_profile(profile: &str) -> String {
+    if profile.is_empty() {
+        resolve_default_profile()
+    } else {
+        profile.to_string()
+    }
+}
+
 pub fn get_update_settings() -> UpdatesConfig {
     load_config()
         .ok()
@@ -751,6 +759,38 @@ pub fn get_claude_config_dir() -> Option<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_effective_profile_returns_input_when_non_empty() {
+        // Non-empty input is passed through verbatim, regardless of what's
+        // configured globally as the default. No filesystem access needed.
+        assert_eq!(effective_profile("personal"), "personal");
+        assert_eq!(effective_profile("default"), "default");
+        assert_eq!(effective_profile("alpha-beta_v2"), "alpha-beta_v2");
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn test_effective_profile_falls_back_to_global_default_when_empty() {
+        let temp_home = tempfile::TempDir::new().unwrap();
+        std::env::set_var("HOME", temp_home.path());
+        #[cfg(target_os = "linux")]
+        std::env::set_var("XDG_CONFIG_HOME", temp_home.path().join(".config"));
+
+        #[cfg(target_os = "linux")]
+        let app_dir = temp_home.path().join(".config").join("agent-of-empires");
+        #[cfg(not(target_os = "linux"))]
+        let app_dir = temp_home.path().join(".agent-of-empires");
+
+        std::fs::create_dir_all(&app_dir).unwrap();
+        std::fs::write(app_dir.join("config.toml"), r#"default_profile = "alpha""#).unwrap();
+
+        assert_eq!(
+            effective_profile(""),
+            "alpha",
+            "empty profile must fall back to the user's globally configured default",
+        );
+    }
 
     // Tests for Config defaults
     #[test]
@@ -801,7 +841,6 @@ mod tests {
     fn test_updates_config_default() {
         let updates = UpdatesConfig::default();
         assert!(updates.check_enabled);
-        assert!(!updates.auto_update);
         assert_eq!(updates.check_interval_hours, 24);
         assert!(updates.notify_in_cli);
     }
@@ -810,13 +849,11 @@ mod tests {
     fn test_updates_config_deserialize() {
         let toml = r#"
             check_enabled = false
-            auto_update = true
             check_interval_hours = 12
             notify_in_cli = false
         "#;
         let updates: UpdatesConfig = toml::from_str(toml).unwrap();
         assert!(!updates.check_enabled);
-        assert!(updates.auto_update);
         assert_eq!(updates.check_interval_hours, 12);
         assert!(!updates.notify_in_cli);
     }
@@ -827,8 +864,26 @@ mod tests {
         let updates: UpdatesConfig = toml::from_str(toml).unwrap();
         assert!(!updates.check_enabled);
         // Defaults for other fields
-        assert!(!updates.auto_update);
         assert_eq!(updates.check_interval_hours, 24);
+    }
+
+    /// Regression: a previous schema had `auto_update = bool` on
+    /// UpdatesConfig (it was wired through profiles but never read).
+    /// The field is gone now, so old configs that still set it must
+    /// deserialize cleanly with the field silently dropped by serde.
+    #[test]
+    fn test_legacy_auto_update_field_is_silently_ignored() {
+        let old_toml = r#"
+            check_enabled = true
+            auto_update = true
+            check_interval_hours = 12
+            notify_in_cli = true
+        "#;
+        let updates: UpdatesConfig =
+            toml::from_str(old_toml).expect("old auto_update field should not error");
+        assert_eq!(updates.check_interval_hours, 12);
+        assert!(updates.check_enabled);
+        assert!(updates.notify_in_cli);
     }
 
     // Tests for WorktreeConfig
