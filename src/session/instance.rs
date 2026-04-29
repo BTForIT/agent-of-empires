@@ -16,10 +16,11 @@ use super::environment::{build_docker_env_args, shell_escape};
 use super::poller::SessionPoller;
 
 use crate::session::capture::{
-    build_exclusion_set, claude_poll_fn, claude_poll_fn_sandboxed, generate_claude_session_id,
-    is_valid_session_id, opencode_poll_fn, opencode_poll_fn_sandboxed,
+    build_exclusion_set, capture_vibe_session_id, claude_poll_fn, claude_poll_fn_sandboxed,
+    generate_claude_session_id, is_valid_session_id, opencode_poll_fn, opencode_poll_fn_sandboxed,
     try_capture_opencode_session_id, try_capture_opencode_session_id_in_container,
-    validated_session_id,
+    try_capture_vibe_session_id_in_container, validated_session_id, vibe_poll_fn,
+    vibe_poll_fn_sandboxed,
 };
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -414,8 +415,9 @@ impl Instance {
     ///
     /// Returns `(session_id, is_existing)`. If a persisted ID exists, returns it
     /// with `is_existing = true`. Otherwise, only Claude gets a new UUID here
-    /// (it requires `--session-id <uuid>` at launch). OpenCode discovers its
-    /// session ID post-launch via the poller.
+    /// (it requires `--session-id <uuid>` at launch). Other agents discover
+    /// their session ID post-launch via the poller (or retroactively via
+    /// `try_retroactive_capture()` when an existing tmux session is reattached).
     pub fn acquire_session_id(&mut self) -> (Option<String>, bool) {
         if self.agent_session_id.is_some() {
             return (self.agent_session_id.clone(), true);
@@ -449,22 +451,38 @@ impl Instance {
     }
 
     pub(crate) fn try_retroactive_capture(&self) -> Option<String> {
-        if self.tool != "opencode" {
-            return None;
-        }
         let exclusion = build_exclusion_set(&self.id);
-        let result = if self.is_sandboxed() {
-            let container_name = self.sandbox_info.as_ref()?.container_name.clone();
-            try_capture_opencode_session_id_in_container(
-                &container_name,
-                &self.container_workdir(),
-                &exclusion,
-                None,
-            )
-        } else {
-            try_capture_opencode_session_id(&self.project_path, &exclusion, None)
+        let result: Option<String> = match self.tool.as_str() {
+            "opencode" => {
+                if self.is_sandboxed() {
+                    let container_name = self.sandbox_info.as_ref()?.container_name.clone();
+                    try_capture_opencode_session_id_in_container(
+                        &container_name,
+                        &self.container_workdir(),
+                        &exclusion,
+                        None,
+                    )
+                    .ok()
+                } else {
+                    try_capture_opencode_session_id(&self.project_path, &exclusion, None).ok()
+                }
+            }
+            "vibe" => {
+                if self.is_sandboxed() {
+                    let container_name = self.sandbox_info.as_ref()?.container_name.clone();
+                    try_capture_vibe_session_id_in_container(
+                        &container_name,
+                        &self.container_workdir(),
+                        &exclusion,
+                    )
+                    .ok()
+                } else {
+                    capture_vibe_session_id(&self.project_path, &exclusion).ok()
+                }
+            }
+            _ => None,
         };
-        result.ok().and_then(validated_session_id)
+        result.and_then(validated_session_id)
     }
 
     fn apply_session_flags(&mut self, cmd: &mut String, context: &str) {
@@ -1059,6 +1077,21 @@ impl Instance {
                         self.id.clone(),
                         launch_time_ms,
                     ))
+                }
+            }
+            "vibe" => {
+                if self.is_sandboxed() {
+                    let container_name = match self.sandbox_info.as_ref() {
+                        Some(s) => s.container_name.clone(),
+                        None => return,
+                    };
+                    Box::new(vibe_poll_fn_sandboxed(
+                        container_name,
+                        self.container_workdir(),
+                        self.id.clone(),
+                    ))
+                } else {
+                    Box::new(vibe_poll_fn(self.project_path.clone(), self.id.clone()))
                 }
             }
             _ => return,
