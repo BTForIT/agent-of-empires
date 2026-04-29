@@ -693,13 +693,15 @@ mod tests {
     }
 
     #[test]
-    fn test_stop_hook_writes_idle() {
+    fn test_stop_hook_writes_waiting() {
+        // End-of-turn means the agent is done and the human is the next actor —
+        // surface that as Waiting (needs attention), not Idle (background of attention).
         let hooks = build_aoe_hooks(claude_events());
         let stop = hooks["Stop"].as_array().unwrap();
         let cmd = stop[0]["hooks"][0]["command"].as_str().unwrap();
         assert!(
-            cmd.contains("printf idle"),
-            "Stop hook should write idle status: {}",
+            cmd.contains("printf waiting"),
+            "Stop hook should write waiting status: {}",
             cmd
         );
     }
