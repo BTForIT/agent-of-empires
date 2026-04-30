@@ -1348,9 +1348,9 @@ mod tests {
     #[test]
     fn test_validate_snooze_duration_accepts_dialog_presets() {
         // The TUI dialog presets must all pass the validator; otherwise
-        // the API silently rejects what the UI offered. Presets ascend
-        // 15min → 1 week.
-        for &m in &[15u64, 30, 60, 120, 240, 480, 1440, 3 * 1440, 7 * 1440] {
+        // the API silently rejects what the UI offered. Presets:
+        // 1-6h (60-360 min), 24h (1 day), 1 week.
+        for &m in &[60u64, 120, 180, 240, 300, 360, 1440, 7 * 1440] {
             assert!(
                 validate_snooze_duration(m).is_ok(),
                 "preset {m} min must pass validator"

@@ -111,10 +111,10 @@ fn format_relative_age(ts: Option<DateTime<Utc>>) -> String {
 }
 
 /// Format a remaining snooze duration as a compact countdown string that
-/// fits in the `LAST_ACTIVITY_SLOT` (e.g. `23m`, `1h`, `59m`). Falls back
+/// fits in the `LAST_ACTIVITY_SLOT` (e.g. `23m`, `1h`, `5d`). Falls back
 /// to `<1m` for sub-minute remainders so the user sees "about to wake"
-/// rather than an empty slot. Days not expected (snooze is capped at 24h
-/// by `validate_snooze_duration`) but formatted defensively.
+/// rather than an empty slot. Picker tops out at 1 week; validator cap
+/// is 30 days, so the day branch handles up to ~30d.
 fn format_snooze_remaining(delta: chrono::Duration) -> String {
     let secs = delta.num_seconds();
     if secs < 60 {

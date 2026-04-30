@@ -226,11 +226,11 @@ impl HomeView {
         Ok(None)
     }
 
-    /// Handle `w`/`W` on the cursor's session. If already snoozed, wake
-    /// it immediately (no picker — the user just wants it back). Otherwise
-    /// open the duration picker (`SnoozeDurationDialog`) so they can choose
-    /// 30 min / 1 hr / 24 hr before the row sinks. The actual snooze runs
-    /// in `snooze_session_for` once the dialog submits.
+    /// Handle `h`/`H`/`w`/`W` on the cursor's session. If already snoozed,
+    /// wake it immediately (no picker — the user just wants it back).
+    /// Otherwise open the duration picker (`SnoozeDurationDialog`) so they
+    /// can choose 1-6 hours / 1 day / 1 week before the row sinks. The
+    /// actual snooze runs in `snooze_session_for` once the dialog submits.
     ///
     /// Snooze semantics: "temporary archive" — sets `snoozed_until = now +
     /// minutes`, the row sinks to tier 99 alongside archived rows, renders
