@@ -1086,7 +1086,7 @@ fn build_session_fields(
         SettingField {
             key: FieldKey::SnoozeDurationMinutes,
             label: "Snooze Duration (minutes)",
-            description: "How long `w`/`W` and `aoe session snooze` defer a session (1-1440)",
+            description: "Default snooze for `aoe session snooze` (1-43200 min, picker overrides)",
             value: FieldValue::Number(snooze_duration_minutes),
             category: SettingsCategory::Session,
             has_override: snooze_duration_override,
