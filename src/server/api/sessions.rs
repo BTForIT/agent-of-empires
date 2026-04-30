@@ -423,7 +423,8 @@ pub async fn update_session_attention(
         }
     }
 
-    let response = SessionResponse::from(&*inst);
+    let response =
+        SessionResponse::from_instance(&*inst, crate::claude_settings::read_tui_fullscreen());
     let profile = inst.source_profile.clone();
 
     if let Ok(storage) = Storage::new(&profile) {
