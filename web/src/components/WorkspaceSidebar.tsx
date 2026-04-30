@@ -288,9 +288,22 @@ const SessionRow = memo(function SessionRow({
       >
         <div className="flex items-center gap-2">
           <span
-            className={`text-sm shrink-0 leading-none font-mono ${textClass}`}
+            className={`text-sm shrink-0 leading-none font-mono ${
+              attention === "archived" || attention === "snoozed"
+                ? "text-text-muted"
+                : textClass
+            }`}
           >
-            <StatusGlyph status={sessionStatus} createdAt={createdAt} />
+            {/* Archived/snoozed rows render a single static muted glyph
+                regardless of underlying status. Mirrors the TUI fix —
+                kills the "archived row still spinning a green dot"
+                visual bug where a stale Running status would keep
+                animating after the user parked the row. */}
+            {attention === "archived" || attention === "snoozed" ? (
+              "⠒"
+            ) : (
+              <StatusGlyph status={sessionStatus} createdAt={createdAt} />
+            )}
           </span>
           <span
             className={`text-[13px] md:text-[14px] truncate flex-1 ${

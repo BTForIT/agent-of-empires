@@ -713,6 +713,23 @@ impl HomeView {
                     tracing::error!("toggle_snooze_at_cursor failed: {}", e);
                 }
             }
+            // `h` / `H` — alias for `w` / `W` (snooze). Mnemonic: Hide,
+            // borrowed from email-app conventions where H snoozes the
+            // focused message off the list for a while. Plain `h` was
+            // previously a vim-style left/collapse alias, but ← already
+            // covers that — and users with email-app muscle memory keep
+            // reaching for H expecting snooze. `w`/`W` stays functional
+            // for backward compat; `h`/`H` is the advertised binding.
+            KeyCode::Char('h') if !self.strict_hotkeys => {
+                if let Err(e) = self.toggle_snooze_at_cursor() {
+                    tracing::error!("toggle_snooze_at_cursor failed: {}", e);
+                }
+            }
+            KeyCode::Char('H') if self.strict_hotkeys => {
+                if let Err(e) = self.toggle_snooze_at_cursor() {
+                    tracing::error!("toggle_snooze_at_cursor failed: {}", e);
+                }
+            }
             // `e` / `E` — restart the selected session (kill tmux pane and
             // re-spawn). Mnemonic: rEstart. Mirrors the non-strict/strict
             // pair pattern. F5 also bound below for muscle memory.
@@ -1607,13 +1624,17 @@ impl HomeView {
                     self.toggle_group_collapsed(&path);
                 }
             }
-            KeyCode::Char('H') | KeyCode::Char('<') => {
+            // `<` shrinks the list pane width; `>` grows it. Capital
+            // H/L used to be aliases here but H is now the advertised
+            // snooze key (mnemonic: Hide), so width controls live on
+            // the angle-bracket characters only.
+            KeyCode::Char('<') => {
                 self.shrink_list();
             }
-            KeyCode::Char('L') | KeyCode::Char('>') => {
+            KeyCode::Char('>') => {
                 self.grow_list();
             }
-            KeyCode::Left | KeyCode::Char('h') => {
+            KeyCode::Left => {
                 if let Some(Item::Group {
                     path, collapsed, ..
                 }) = self.flat_items.get(self.cursor)

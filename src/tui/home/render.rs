@@ -513,7 +513,7 @@ impl HomeView {
                 if let Some(inst) = self.get_instance(id) {
                     match self.view_mode {
                         ViewMode::Agent => {
-                            let icon = match inst.status {
+                            let mut icon = match inst.status {
                                 Status::Running => spinner_running(&inst.created_at),
                                 Status::Waiting => spinner_waiting(&inst.created_at),
                                 Status::Idle => ICON_IDLE,
@@ -536,28 +536,24 @@ impl HomeView {
                                 Status::Creating => theme.accent,
                             };
                             let mut style = Style::default().fg(color);
-                            if inst.is_archived() {
-                                // Archive must visually demote the row even
-                                // when status would otherwise color it red
-                                // (Error) or amber (Waiting). DIM alone only
-                                // lowers intensity — it doesn't kill the hue,
-                                // so an archived Error row still screams red.
-                                // Override foreground to theme.dimmed so the
-                                // row reads as muted gray; the status icon
-                                // (✕ / ⠒ / etc.) keeps its semantic glyph.
-                                style = Style::default()
-                                    .fg(theme.dimmed)
-                                    .add_modifier(ratatui::style::Modifier::ITALIC)
-                                    .add_modifier(ratatui::style::Modifier::DIM);
-                            } else if inst.is_snoozed() {
-                                // Snoozed = "temporary archive": same
-                                // foreground demotion + italic+dim style as
-                                // archive so the row visually sinks
-                                // regardless of status, plus a `z ` ASCII
-                                // prefix (single-column glyph — mirrors the
-                                // favorite "* " fix that avoided iOS emoji
-                                // wide-width rendering bugs). The age column
-                                // separately shows remaining sleep time.
+                            if inst.is_archived() || inst.is_snoozed() {
+                                // Archived AND snoozed rows render with one
+                                // uniform muted glyph regardless of underlying
+                                // status. Without this override an archived
+                                // session whose sidecar still says `running`
+                                // would keep animating its spinner (just
+                                // dimmed) — visually identical to an active
+                                // session and a recurring source of "why is
+                                // this archived row spinning" confusion. The
+                                // semantic state still lives in the persisted
+                                // `inst.status`; we just stop painting it
+                                // here because archive/snooze are by
+                                // definition "not actively asking for
+                                // attention." Same glyph as ICON_STOPPED so
+                                // the row reads as quiet/parked. Error (✕)
+                                // also gets folded in — an archived error is
+                                // still archived; the red ✕ goes away.
+                                icon = ICON_STOPPED;
                                 style = Style::default()
                                     .fg(theme.dimmed)
                                     .add_modifier(ratatui::style::Modifier::ITALIC)
@@ -605,26 +601,20 @@ impl HomeView {
                                     .map(|s| s.exists())
                                     .unwrap_or(false),
                             };
-                            let (icon, color) = if terminal_running {
+                            let (mut icon, color) = if terminal_running {
                                 (spinner_running(&inst.created_at), theme.terminal_active)
                             } else {
                                 (ICON_IDLE, theme.dimmed)
                             };
                             let mut style = Style::default().fg(color);
-                            if inst.is_archived() {
-                                // Same demote-foreground rule as the Agent
-                                // view path above — kill the active-terminal
-                                // hue when archived so the row visually
-                                // sinks regardless of session state.
-                                style = Style::default()
-                                    .fg(theme.dimmed)
-                                    .add_modifier(ratatui::style::Modifier::ITALIC)
-                                    .add_modifier(ratatui::style::Modifier::DIM);
-                            } else if inst.is_snoozed() {
-                                // Same visual treatment as the Agent view
-                                // path above — fg=dimmed + italic+dim + `z `
-                                // prefix. Style is applied here; prefix
-                                // lives in `title_text` below.
+                            if inst.is_archived() || inst.is_snoozed() {
+                                // Mirrors the Agent-view path: archived AND
+                                // snoozed rows render with one uniform muted
+                                // glyph regardless of underlying state. Kills
+                                // the running-spinner-on-archived-row visual
+                                // bug where a stale terminal session would
+                                // animate even after the user parked the row.
+                                icon = ICON_STOPPED;
                                 style = Style::default()
                                     .fg(theme.dimmed)
                                     .add_modifier(ratatui::style::Modifier::ITALIC)
@@ -1190,7 +1180,7 @@ impl HomeView {
         }
         if self.selected_session.is_some() {
             groups.push((1, mk(if strict { "F" } else { "f" }, "Fav")));
-            groups.push((1, mk(if strict { "W" } else { "w" }, "Snooze")));
+            groups.push((1, mk(if strict { "H" } else { "h" }, "Snooze")));
         }
 
         groups.push((4, mk("/", "Search")));
