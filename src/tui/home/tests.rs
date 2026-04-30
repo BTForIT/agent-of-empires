@@ -1562,19 +1562,19 @@ fn test_grow_list_clamps_at_maximum() {
 
 #[test]
 #[serial]
-fn test_uppercase_h_shrinks_list() {
+fn test_lt_shrinks_list() {
     let mut env = create_test_env_empty();
     assert_eq!(env.view.list_width, 35);
-    env.view.handle_key(key(KeyCode::Char('H')), None);
+    env.view.handle_key(key(KeyCode::Char('<')), None);
     assert_eq!(env.view.list_width, 30);
 }
 
 #[test]
 #[serial]
-fn test_uppercase_l_grows_list() {
+fn test_gt_grows_list() {
     let mut env = create_test_env_empty();
     assert_eq!(env.view.list_width, 35);
-    env.view.handle_key(key(KeyCode::Char('L')), None);
+    env.view.handle_key(key(KeyCode::Char('>')), None);
     assert_eq!(env.view.list_width, 40);
 }
 
