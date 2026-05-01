@@ -597,7 +597,8 @@ impl HomeView {
         // equivalents so the match block below doesn't need duplication.
         //
         // Mapping (strict mode only):
-        //   Shift+letter actions -> lowercase: N->n, X->x, D->d, R->r, S->s, M->m, T->t, C->c, Q->q, O->o
+        //   Shift+letter actions -> pass through unchanged: each has its own
+        //     `Char('UPPER') if self.strict_hotkeys` arm in the main match.
         //   Ctrl+letter relocated bindings -> uppercase: Ctrl+T->T, Ctrl+D->D, Ctrl+R->R, Ctrl+P->P, Ctrl+N->N
         //   Ctrl+G -> g (group toggle was lowercase)
         //   Bare lowercase action letters -> blocked (return None)
@@ -2254,33 +2255,15 @@ impl HomeView {
             }
             // Ctrl+O stays as-is (cycle sort backward, already handled by its own arm)
             KeyCode::Char('o') if ctrl => Some(key),
-            // Shifted action letters used to be lowercased here so a single
-            // `Char('letter')` arm could handle both modes. That was a bug:
-            // every target lowercase handler is guarded `if !self.strict_hotkeys`,
-            // so the normalize sent the chord into a dead arm and strict mode
-            // could never reach the action. Each letter has its own
-            // `Char('UPPER') if self.strict_hotkeys` arm that does the right
-            // thing — passing Shift+letter through unchanged lets those arms
-            // fire directly. Affects N (new session), X (stop), S (settings),
-            // M (message), T (toggle view), C (container toggle), Q (quit).
-            // Q was already excluded; the remaining six are now no longer
-            // normalized either.
+            // Shifted action letters pass through unchanged. Each letter has its
+            // own `Char('UPPER') if self.strict_hotkeys` arm in the main match.
+            // Lowercasing here would route the chord into a dead arm guarded
+            // `if !self.strict_hotkeys`, so the action would silently no-op.
+            // Affects D (delete), R (rename), N, X, S, M, T, C, Q, O.
             //
-            // Side benefit: this also makes the chords work on iOS Mosh, where
-            // Shift+letter is delivered as the bare uppercase keycode without
-            // a Shift modifier.
-            //
-            // `O` is INTENTIONALLY excluded from any normalize: lowercasing
-            // Shift+O to 'o' would collide with bare 'o' (which must fall
-            // through to the compose dialog in strict mode — "no destructive
-            // lowercase" rule). Let 'O' reach the main match as-is so its own
-            // `Char('O')` arm can fire for sort-cycle without ambiguity.
-            // D -> d (delete) and R -> r (rename) in strict mode
-            // (the original uppercase D=diff and R=serve are now behind Ctrl)
-            KeyCode::Char(c @ ('D' | 'R')) if bare || shift_only => Some(KeyEvent::new(
-                KeyCode::Char(c.to_ascii_lowercase()),
-                KeyModifiers::NONE,
-            )),
+            // Side benefit: passing through unchanged also makes the chords work
+            // on iOS Mosh, where Shift+letter is delivered as the bare uppercase
+            // keycode without a Shift modifier.
             // Bare lowercase letters pass through — the main match falls through
             // to a catch-all that opens the compose dialog pre-filled with the
             // letter (strict-mode typing-guard). Navigation keys j/k/h/l are
