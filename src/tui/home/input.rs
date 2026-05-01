@@ -1657,7 +1657,13 @@ impl HomeView {
                     }
                 }
             }
-            KeyCode::Char('w') => {
+            // Upstream PR #796 added `w` for jump-to-next-waiting after the
+            // snooze feature (a19337b) had already taken `w`/`W`. In non-strict
+            // mode the snooze arm at line 707 catches first, so this jump arm
+            // was always dead. In strict mode it leaked through and preempted
+            // the typing-guard below — bare `w` jumped the cursor instead of
+            // opening compose like every other lowercase letter. Gate it.
+            KeyCode::Char('w') if !self.strict_hotkeys => {
                 self.jump_to_next_waiting();
             }
             // Strict-mode typing guard: any bare lowercase letter that isn't a
