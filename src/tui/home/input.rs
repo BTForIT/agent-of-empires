@@ -1865,8 +1865,13 @@ impl HomeView {
             self.move_cursor(-1);
             return true;
         }
-        if !self.hit_preview(col, row) || self.selected_session.is_none() {
+        if !self.hit_preview(col, row) {
             return false;
+        }
+        // Wheel over preview with no session selected — fall through to list nav.
+        if self.selected_session.is_none() {
+            self.move_cursor(-1);
+            return true;
         }
 
         let active_cache = match self.view_mode {
@@ -1897,7 +1902,9 @@ impl HomeView {
         let new_offset = self.preview_scroll_offset.saturating_add(STEP);
         let clamped = new_offset.min(real_max);
         if clamped == self.preview_scroll_offset {
-            return false;
+            // Preview already at top — fall through to list nav so the wheel isn't a no-op.
+            self.move_cursor(-1);
+            return true;
         }
         self.preview_scroll_offset = clamped;
         true
@@ -1917,11 +1924,18 @@ impl HomeView {
             self.move_cursor(1);
             return true;
         }
-        if !self.hit_preview(col, row) || self.selected_session.is_none() {
+        if !self.hit_preview(col, row) {
             return false;
         }
+        // Wheel over preview with no session selected — fall through to list nav.
+        if self.selected_session.is_none() {
+            self.move_cursor(1);
+            return true;
+        }
         if self.preview_scroll_offset == 0 {
-            return false;
+            // Preview already at bottom — fall through to list nav so the wheel isn't a no-op.
+            self.move_cursor(1);
+            return true;
         }
         self.preview_scroll_offset = self.preview_scroll_offset.saturating_sub(STEP);
         true
