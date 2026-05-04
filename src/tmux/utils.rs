@@ -108,6 +108,45 @@ pub fn append_window_size_args(args: &mut Vec<String>, target: &str) {
     ]);
 }
 
+/// Append the two tmux options required for OSC 52 clipboard escapes from
+/// the wrapped agent (Claude Code, OpenCode, Codex, etc.) to reach the outer
+/// terminal. Without these, "select to copy" inside the agent silently fails
+/// because tmux drops the sequence (see #897).
+///
+/// Two distinct mechanisms are covered:
+///   * `set-clipboard on` (server option): captures and forwards raw OSC 52
+///     sequences to attached terminal clients.
+///   * `allow-passthrough on` (window option, added in tmux 3.3): allows
+///     `\ePtmux;...\e\\`-wrapped escapes (the form OpenCode uses) to be
+///     unwrapped and forwarded.
+///
+/// Programs vary in which form they emit, so both are set defensively. Scope
+/// flags are explicit (`-s`, `-w`) so the call site is unambiguous and
+/// resilient to future tmux scope-inference changes; matches the convention
+/// used by `append_remain_on_exit_args` for `remain-on-exit`.
+///
+/// `-q` (silently ignore errors) keeps aoe compatible with tmux < 3.3, where
+/// `allow-passthrough` does not exist. On those versions the set-option call
+/// quietly no-ops instead of failing the whole `new-session` invocation.
+pub fn append_clipboard_passthrough_args(args: &mut Vec<String>, target: &str) {
+    args.extend([
+        ";".to_string(),
+        "set-option".to_string(),
+        "-q".to_string(),
+        "-s".to_string(),
+        "set-clipboard".to_string(),
+        "on".to_string(),
+        ";".to_string(),
+        "set-option".to_string(),
+        "-q".to_string(),
+        "-w".to_string(),
+        "-t".to_string(),
+        target.to_string(),
+        "allow-passthrough".to_string(),
+        "on".to_string(),
+    ]);
+}
+
 pub fn is_pane_dead(session_name: &str) -> bool {
     // Use `^.0` to target the first window's first pane regardless of
     // base-index or which pane is active, so the check always hits the
@@ -329,5 +368,31 @@ mod tests {
     #[test]
     fn test_format_tmux_prefix_empty_falls_back() {
         assert_eq!(format_tmux_prefix(""), "Ctrl+b");
+    }
+
+    #[test]
+    fn test_append_clipboard_passthrough_args() {
+        let mut args: Vec<String> = vec!["new-session".into()];
+        append_clipboard_passthrough_args(&mut args, "aoe_test");
+        assert_eq!(
+            args,
+            vec![
+                "new-session",
+                ";",
+                "set-option",
+                "-q",
+                "-s",
+                "set-clipboard",
+                "on",
+                ";",
+                "set-option",
+                "-q",
+                "-w",
+                "-t",
+                "aoe_test",
+                "allow-passthrough",
+                "on",
+            ]
+        );
     }
 }
