@@ -452,12 +452,13 @@ fn attention_tier(inst: &Instance) -> u8 {
     }
 }
 
-/// Key used to sort sessions by Attention. Primary = priority tier ascending.
-/// Secondary/tertiary = "longest aging first" — within a tier, the session
-/// that has been ignored the longest bubbles to the top. A Waiting session
-/// that has been sitting untouched for 2 days should rank above one that
-/// was just bumped a minute ago, because the stale one is the one most
-/// likely to have been forgotten.
+/// Key used to sort sessions by Attention. Primary = urgent-bias (the agent
+/// has flagged the session via `attention-urgent`); secondary = priority tier
+/// ascending; tertiary = favorite within tier; rest = "longest aging first" —
+/// within a tier, the session that has been ignored the longest bubbles to
+/// the top. A Waiting session that has been sitting untouched for 2 days
+/// should rank above one that was just bumped a minute ago, because the
+/// stale one is the one most likely to have been forgotten.
 ///
 /// Sessions with no `last_accessed_at` (never polled / just created) bucket
 /// into the "no activity" slot AFTER the dated ones, so fresh-but-untouched
@@ -465,11 +466,13 @@ fn attention_tier(inst: &Instance) -> u8 {
 ///
 /// Within tier 99 (archived), preserve the reverse convention — most-recently
 /// archived first, since the archive block is a recency view, not an
-/// attention view.
+/// attention view. Urgent is suppressed for tier 99 so a sunk row can't
+/// claw back to the top.
 #[allow(clippy::type_complexity)]
 fn attention_session_key(
     inst: &Instance,
 ) -> (
+    bool,
     u8,
     bool,
     bool,
@@ -477,6 +480,12 @@ fn attention_session_key(
     Option<DateTime<Utc>>,
 ) {
     let tier = attention_tier(inst);
+    // Urgent is the cross-tier promoter: an agent that has flagged itself
+    // urgent rises above all non-urgent rows regardless of status tier.
+    // Encoded `!urgent_bias` since `false` sorts before `true`. Tier 99
+    // suppresses urgent (is_urgent() already short-circuits on archived/
+    // snoozed; the redundant guard here mirrors favorite's pattern).
+    let urgent_bias = tier != 99 && inst.is_urgent();
     // Favorite pins to the top of its category — tier stays primary so a
     // fav'd Running never leaps above a plain Waiting. Within a tier,
     // favorited rows bubble first (encoded `!favorite_bias` since `false`
@@ -492,13 +501,21 @@ fn attention_session_key(
         // both: a just-archived row and a just-snoozed row both belong
         // near the top of the sunk section.
         let ts = inst.archived_at.or(inst.snoozed_until);
-        return (tier, !favorite_bias, ts.is_none(), Reverse(ts), None);
+        return (
+            !urgent_bias,
+            tier,
+            !favorite_bias,
+            ts.is_none(),
+            Reverse(ts),
+            None,
+        );
     }
     // Non-archived: "longest aging" = oldest last_accessed_at first (ASC).
     // The `Reverse` slot is forced to `Reverse(None)` (= sorts after all
     // Some() in the Reverse ordering) so it doesn't contribute — the real
     // tiebreak is the trailing ASC field.
     (
+        !urgent_bias,
         tier,
         !favorite_bias,
         inst.last_accessed_at.is_none(),
@@ -530,6 +547,7 @@ fn attention_group_key(
     group_archived_at: Option<DateTime<Utc>>,
     instances: &[Instance],
 ) -> (
+    bool,
     u8,
     bool,
     bool,
@@ -546,9 +564,9 @@ fn attention_group_key(
         // Empty group: if marked archived, sink to tier 99 with the group's
         // own archived_at; otherwise leave at u8::MAX (existing behavior).
         if let Some(ts) = group_archived_at {
-            return (99, true, false, Reverse(Some(ts)), None);
+            return (true, 99, true, false, Reverse(Some(ts)), None);
         }
-        return (u8::MAX, true, true, Reverse(None), None);
+        return (true, u8::MAX, true, true, Reverse(None), None);
     }
 
     let min_tier = members
@@ -556,6 +574,12 @@ fn attention_group_key(
         .map(|i| attention_tier(i))
         .min()
         .unwrap_or(u8::MAX);
+
+    // Group-level urgent bias: any non-sunk member with the urgent flag
+    // promotes the entire group above non-urgent peers across all tiers.
+    // Mirrors the session-level cross-tier behavior so a buried group
+    // containing a live device-code prompt floats up.
+    let urgent_bias = min_tier != 99 && members.iter().any(|i| i.is_urgent());
 
     // Group-level favorite bias: within its min_tier bucket, a group with
     // any live favorited member pins above peers. Mirrors the session key's
@@ -571,7 +595,14 @@ fn attention_group_key(
         // (shouldn't happen given is_archived, but defensive).
         let max_arch = members.iter().filter_map(|i| i.archived_at).max();
         let ts = max_arch.or(group_archived_at);
-        return (99, !favorite_bias, ts.is_none(), Reverse(ts), None);
+        return (
+            !urgent_bias,
+            99,
+            !favorite_bias,
+            ts.is_none(),
+            Reverse(ts),
+            None,
+        );
     }
 
     // Non-archived: "longest aging" = oldest max(last_accessed_at) first.
@@ -580,6 +611,7 @@ fn attention_group_key(
     // mirrors `attention_session_key` so the intent is uniform.
     let max_last = members.iter().filter_map(|i| i.last_accessed_at).max();
     (
+        !urgent_bias,
         min_tier,
         !favorite_bias,
         max_last.is_none(),
@@ -1614,7 +1646,7 @@ mod tests {
 
         let instances = vec![a, b];
         let key = attention_group_key("work", None, &instances);
-        assert_eq!(key.0, 99, "all-archived group should sort to tier 99");
+        assert_eq!(key.1, 99, "all-archived group should sort to tier 99");
     }
 
     #[test]
@@ -1633,7 +1665,7 @@ mod tests {
         let instances = vec![archived_waiting, active_idle];
         let key = attention_group_key("work", None, &instances);
         assert_eq!(
-            key.0, 2,
+            key.1, 2,
             "group with one active Idle session should sort at tier 2"
         );
     }
@@ -1642,11 +1674,11 @@ mod tests {
     fn test_attention_group_key_empty_archived_group() {
         let now = chrono::Utc::now();
         let key = attention_group_key("empty", Some(now), &[]);
-        assert_eq!(key.0, 99, "empty archived group sinks to tier 99");
+        assert_eq!(key.1, 99, "empty archived group sinks to tier 99");
 
         let key_unarchived = attention_group_key("empty", None, &[]);
         assert_eq!(
-            key_unarchived.0,
+            key_unarchived.1,
             u8::MAX,
             "empty unarchived group keeps prior u8::MAX behavior"
         );
@@ -1742,8 +1774,8 @@ mod tests {
         assert!(inst.is_archived(), "archive set");
         assert!(!inst.is_favorited(), "archive cleared favorite");
         let key = attention_session_key(&inst);
-        assert_eq!(key.0, 99, "tier 99 (archived)");
-        assert!(key.1, "no favorite bias (bias bool is 'true' = !pinned)");
+        assert_eq!(key.1, 99, "tier 99 (archived)");
+        assert!(key.2, "no favorite bias (bias bool is 'true' = !pinned)");
     }
 
     #[test]

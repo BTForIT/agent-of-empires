@@ -469,6 +469,18 @@ impl Instance {
         self.favorited_at.is_some()
     }
 
+    /// Read the agent-raised urgent flag from `attention.json`. Sourced
+    /// on-demand from `/tmp/aoe-hooks/{id}/attention.json` so it picks up
+    /// changes the running agent makes (via the `attention-urgent` script)
+    /// without an Instance state mutation. Suppressed for archived/snoozed
+    /// rows so a sunk session can't claw its way back to the top.
+    pub fn is_urgent(&self) -> bool {
+        if self.is_archived() || self.is_snoozed() {
+            return false;
+        }
+        crate::hooks::read_hook_urgent(&self.id)
+    }
+
     /// Temporarily defer this session for `minutes` — sets `snoozed_until`
     /// to `Utc::now() + minutes`. Behaves like a timed archive: the row
     /// sinks to tier 99, renders italic+dim with a `z ` prefix, and shows

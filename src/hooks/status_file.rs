@@ -35,6 +35,40 @@ pub fn read_hook_status(instance_id: &str) -> Option<Status> {
     }
 }
 
+/// Read the urgent flag from the hook-written `attention.json` for the given
+/// instance. Set by the `attention-urgent` script (cx-scripts) when the agent
+/// surfaces something genuinely time-sensitive (expiring device code, hard
+/// deadline, blocking outage). Returns false when the file is missing,
+/// malformed, missing the `urgent` flag, or when `urgent_expires_at` has
+/// already passed (auto-expiry — keeps stale flags from pinning the row
+/// forever after the deadline lapses).
+pub fn read_hook_urgent(instance_id: &str) -> bool {
+    let path = hook_status_dir(instance_id).join("attention.json");
+    let Ok(content) = std::fs::read_to_string(&path) else {
+        return false;
+    };
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(&content) else {
+        return false;
+    };
+    if !value
+        .get("urgent")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false)
+    {
+        return false;
+    }
+    if let Some(exp) = value.get("urgent_expires_at").and_then(|v| v.as_i64()) {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or(0);
+        if now > exp {
+            return false;
+        }
+    }
+    true
+}
+
 /// Remove the hook status directory for a given instance (cleanup on stop/delete).
 pub fn cleanup_hook_status_dir(instance_id: &str) {
     let dir = hook_status_dir(instance_id);

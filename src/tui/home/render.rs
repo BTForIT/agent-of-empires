@@ -558,6 +558,21 @@ impl HomeView {
                                     .fg(theme.dimmed)
                                     .add_modifier(ratatui::style::Modifier::ITALIC)
                                     .add_modifier(ratatui::style::Modifier::DIM);
+                            } else if inst.is_urgent() {
+                                // Agent flagged this row urgent via the
+                                // `attention-urgent` script. Override fg with
+                                // the error color (red) and add BOLD +
+                                // RAPID_BLINK so the row screams across the
+                                // pane. Urgent wins over favorite styling
+                                // since urgent is a cross-tier promoter and
+                                // the visual must match: a row that sorts to
+                                // top must look the part. Archive/snooze
+                                // still wins over urgent because is_urgent()
+                                // returns false for sunk rows.
+                                style = Style::default()
+                                    .fg(theme.error)
+                                    .add_modifier(ratatui::style::Modifier::BOLD)
+                                    .add_modifier(ratatui::style::Modifier::RAPID_BLINK);
                             } else if inst.is_favorited() {
                                 // Favorited, non-archived: bold + underlined
                                 // + "* " prefix. ASCII-only glyph (previously
@@ -570,13 +585,16 @@ impl HomeView {
                                     .add_modifier(ratatui::style::Modifier::BOLD)
                                     .add_modifier(ratatui::style::Modifier::UNDERLINED);
                             }
-                            // Prefix priority: archive (no prefix) wins
-                            // over snooze (`z `) wins over favorite (`* `).
-                            // Matches the sort-tier priority: archive > snooze > favorite.
+                            // Prefix priority: archive (no prefix) wins over
+                            // snooze (`z `) wins over urgent (`! `) wins over
+                            // favorite (`* `). Matches the sort-tier priority:
+                            // archive > snooze > urgent > favorite.
                             let title_text = if inst.is_archived() {
                                 Cow::Owned(inst.title.clone())
                             } else if inst.is_snoozed() {
                                 Cow::Owned(format!("z {}", inst.title))
+                            } else if inst.is_urgent() {
+                                Cow::Owned(format!("! {}", inst.title))
                             } else if inst.is_favorited() {
                                 Cow::Owned(format!("* {}", inst.title))
                             } else {
@@ -619,6 +637,15 @@ impl HomeView {
                                     .fg(theme.dimmed)
                                     .add_modifier(ratatui::style::Modifier::ITALIC)
                                     .add_modifier(ratatui::style::Modifier::DIM);
+                            } else if inst.is_urgent() {
+                                // Mirrors the Agent-view path: agent flagged
+                                // urgent gets red + BOLD + RAPID_BLINK across
+                                // both view modes so the visual is consistent
+                                // when the user toggles agent/terminal view.
+                                style = Style::default()
+                                    .fg(theme.error)
+                                    .add_modifier(ratatui::style::Modifier::BOLD)
+                                    .add_modifier(ratatui::style::Modifier::RAPID_BLINK);
                             } else if inst.is_favorited() {
                                 // Favorited, non-archived: bold + underlined
                                 // + "* " prefix. ASCII-only glyph (previously
@@ -635,6 +662,8 @@ impl HomeView {
                                 Cow::Owned(inst.title.clone())
                             } else if inst.is_snoozed() {
                                 Cow::Owned(format!("z {}", inst.title))
+                            } else if inst.is_urgent() {
+                                Cow::Owned(format!("! {}", inst.title))
                             } else if inst.is_favorited() {
                                 Cow::Owned(format!("* {}", inst.title))
                             } else {
