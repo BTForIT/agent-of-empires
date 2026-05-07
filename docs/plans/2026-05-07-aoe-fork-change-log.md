@@ -191,78 +191,77 @@ Already partially upstreamed in #762/#777 but several follow-up fixes remain loc
 
 ## How to keep up to date with upstream — the workflow
 
-### Branch model going forward
+### End state (the only acceptable target)
 
-```
-upstream/main        ← single source of truth
-   │
-   ├── feat/attention-system    ← clean PR candidate, rebased on upstream/main
-   ├── feat/spawn-pickers       ← clean PR candidate
-   ├── fix/attention-aging-followups
-   ├── fix/voiceink-paste
-   ├── ...
-   │
-   └── local/deploy             ← upstream/main + cherry-picks of accepted PRs
-                                  + LOCAL-ONLY patches (Themes H, I)
-                                  This is what gets installed.
-```
+**`agent-of-empires` checkout = `upstream/main`. Period.** No `local/deploy`. No `our/integration`. No long-lived divergent branches that ship binaries. The only reason to ever check out something other than `upstream/main` is to author a PR branch that will be merged or deleted within days.
 
-### Pulling upstream
+Updating becomes:
 
 ```bash
 cd ~/GitProjects/personal-dev/forks/agent-of-empires
-git fetch upstream
-git fetch origin
-
-# Update local main mirror
-git checkout main && git merge --ff-only upstream/main && git push origin main
-
-# Rebase the deploy branch
-git checkout local/deploy
-git rebase upstream/main           # already-merged commits drop automatically
-                                   # via patch-id equivalence (cherry-pick aware)
-# Resolve any conflicts (rare if PRs land cleanly)
-
-# Rebuild + install
-cargo build --release --features serve
-cp target/release/aoe ~/.cargo/bin/aoe
+git fetch upstream && git checkout main && git merge --ff-only upstream/main
+cargo build --release --features serve && cp target/release/aoe ~/.cargo/bin/aoe
 ```
 
-### Why this model and not "merge upstream into our/integration"
+That's it. No conflict resolution. No "which branch am I deploying from."
 
-`our/integration` accumulates merge commits (8 visible in `git log --merges`). Each merge changes commit hashes downstream, breaks `git cherry`'s already-merged detection, and forces conflict resolution every time you pull upstream. **A rebase-only deploy branch never has merge commits, so already-merged PRs disappear cleanly.**
+### Per-theme fate (every commit goes somewhere)
 
-### Migration: turning the current state into the new model
+Each of the 73 local-only commits resolves to exactly one of three outcomes. Nothing stays local in the fork.
 
-1. Create `local/deploy` from `feat/attention-flat-no-groups` (the currently-installed branch).
-2. Rebase `local/deploy` on `upstream/main` — drops anything already merged upstream.
-3. For each Theme above marked "PR-ready" or "PR candidate":
-   - Create branch from `upstream/main`
-   - `git cherry-pick` the relevant commits
-   - Push to `origin`, open PR upstream
-4. Delete `our/integration` once `local/deploy` is green and installed.
-5. Update CLAUDE.md table to point at `local/deploy` as the live branch.
+| Theme | Disposition | Action |
+|-------|-------------|--------|
+| A — Attention/sort/cursor (archive/favorite/snooze) | **Upstream PR** `feat/attention-system` | Biggest single PR. Bundle cohesively. |
+| B — Cursor jumping | **Upstream PR** `feat/cursor-jumps` | Small, self-contained. |
+| C — last_accessed_at follow-ups | **Upstream PR** `fix/attention-aging-followups` | Stacks on already-merged #762/#777. |
+| D — Strict-hotkeys regressions | **Upstream PR(s)** `fix/strict-hotkeys-*` | Each fix is tiny; can be one PR or several. |
+| E — Mosh/iPad layout polish | **Upstream PR** `feat/responsive-mosh-followups` | Stacks on already-merged #865. |
+| F — Spawn pickers | **Upstream PR** `feat/spawn-pickers` | Small, self-contained, easy review. |
+| G — Headless/wedge fixes | **Upstream PR(s)** `fix/headless-*` | Cheap wins, file individually. |
+| H — cs-aliases | **Move out of fork** | Not AoE concern. → `personal-dev/cx-scripts/`. |
+| I — Hooks shimmed into AoE | **Move out of fork** | Not AoE concern. → `personal-dev/claude-hooks/`. |
+| J — Misc UI tweaks | **Upstream PR(s)** | File individually as makes sense. |
+| K — PR #778 (default-view-mode) | **Already open upstream** | Just ride it in; nudge if stale. |
+
+**Themes H and I are the critical insight.** They're the reason `our/integration` exists at all — local-only customizations that never had any business inside the AoE source tree. Their content already has a proper home in `personal-dev/`. Move them, then they stop being a fork-divergence problem forever.
+
+### Pulling upstream while drain is in progress
+
+Until every theme is drained, the only branch that should ship binaries is the one with the fewest pending PRs. Right now that's `feat/attention-flat-no-groups` (94 ahead). To pull a new upstream release without making the situation worse:
+
+```bash
+git fetch upstream
+git checkout feat/attention-flat-no-groups
+git rebase upstream/main         # already-merged PR commits drop via patch-id equivalence
+# Build + install
+cargo build --release --features serve && cp target/release/aoe ~/.cargo/bin/aoe
+```
+
+**Rule during drain:** when a theme lands upstream, immediately rebase the deploy branch on upstream/main so those commits drop. The deploy branch only ever shrinks.
 
 ### Rules to keep this clean
 
-1. **Never merge upstream into a feature branch.** Rebase only.
-2. **Never commit to `local/deploy` directly.** Always cherry-pick from a feature branch.
-3. **One feature = one branch = one PR.** Don't pile work into `our/integration`-style mega-branches.
-4. **LOCAL-ONLY commits go on `local/deploy` only**, with commit message prefix `local:` so they're trivially identifiable.
-5. **Pull upstream weekly** — the longer between rebases, the worse the conflicts.
+1. **Never merge upstream into anything.** Rebase only.
+2. **No new local-only commits to the AoE fork.** If it's not going upstream, it doesn't belong in this repo. Themes H and I prove the point.
+3. **One feature = one branch = one PR.** Don't accumulate work into mega-branches.
+4. **Once a PR merges, delete its local branch and rebase the deploy branch immediately.**
+5. **Drain bias:** prioritize PRs by ratio of (commits removed from local) ÷ (review effort). Themes F, G, B clear quickly.
 
 ## Action items (concrete)
 
-- [ ] Create `local/deploy` from current installed HEAD.
-- [ ] Rebase `local/deploy` onto `upstream/main` (v1.5.2). Bump `~/.cargo/bin/aoe` to 1.5.2.
-- [ ] PR Theme F (`feat/spawn-pickers`) — small, self-contained, easy review.
-- [ ] PR Theme G (4 tiny fixes — headless, send-keys separator, send_message profile save) — cheap wins.
-- [ ] PR Theme A (`feat/attention-system`) — biggest unmerged chunk; bundle archive/favorite/snooze cohesively.
-- [ ] PR Theme C (`fix/attention-aging-followups`) — layered fixes on already-merged work.
-- [ ] PR Theme D individual `fix/strict-hotkeys-*` — each is small.
-- [ ] PR Theme J individually as it makes sense.
-- [ ] Delete `our/integration` after `local/deploy` is the source of truth.
-- [ ] Update top-level `CLAUDE.md` "## Where things live" + "## Outstanding issues" to point at `local/deploy`.
+- [ ] **Move Theme H commits out of fork** → `personal-dev/cx-scripts/` (cs-aliases). Revert in fork.
+- [ ] **Move Theme I commits out of fork** → `personal-dev/claude-hooks/`. Revert in fork. (Most content already lives there; fork copies are stale duplicates.)
+- [ ] PR Theme F (`feat/spawn-pickers`) — easiest first PR.
+- [ ] PR Theme G individually (4 tiny fixes — headless, send-keys separator, send_message profile save).
+- [ ] PR Theme B (`feat/cursor-jumps`).
+- [ ] PR Theme D individually (`fix/strict-hotkeys-*`).
+- [ ] PR Theme C (`fix/attention-aging-followups`).
+- [ ] PR Theme E (`feat/responsive-mosh-followups`).
+- [ ] PR Theme J individually as makes sense.
+- [ ] PR Theme A (`feat/attention-system`) — biggest, save for last; review cycle will be longest.
+- [ ] Nudge upstream on PR #778 if still open.
+- [ ] After every PR merges or every revert lands: rebase `feat/attention-flat-no-groups` on `upstream/main` so already-merged commits drop. Watch the "ahead by N" count fall.
+- [ ] **Once `feat/attention-flat-no-groups` is 0 commits ahead of `upstream/main`:** delete the branch, delete `our/integration`, switch installed binary to plain `main`. Update top-level `CLAUDE.md` "Where things live" to drop the "active deploy branch" row.
 
 ## Currently open / WIP feature branches (snapshot 2026-05-07)
 
