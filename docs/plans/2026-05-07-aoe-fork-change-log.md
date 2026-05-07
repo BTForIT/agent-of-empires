@@ -218,8 +218,8 @@ Each of the 73 local-only commits resolves to exactly one of three outcomes. Not
 | E — Mosh/iPad layout polish | **Upstream PR** `feat/responsive-mosh-followups` | Stacks on already-merged #865. |
 | F — Spawn pickers | **Upstream PR** `feat/spawn-pickers` | Small, self-contained, easy review. |
 | G — Headless/wedge fixes | **Upstream PR(s)** `fix/headless-*` | Cheap wins, file individually. |
-| H — cs-aliases | **Move out of fork** | Not AoE concern. → `personal-dev/cx-scripts/`. |
-| I — Hooks shimmed into AoE | **Move out of fork** | Not AoE concern. → `personal-dev/claude-hooks/`. |
+| H — cs-aliases (account switcher / launcher) | **Upstream PR + side config** `feat/custom-commands` | Pitch upstream as "user-defined custom commands / functions" (a generic extension point, e.g. `[custom_commands]` table in config or a `~/.config/aoe/commands.d/`). The cs-aliases / account-switcher / launcher then live as user-side config files using that feature, not as fork commits. |
+| I — Hooks shimmed into AoE | **Move out of fork** | Not AoE concern. → `personal-dev/claude-hooks/`. Most content already lives there; fork copies are stale duplicates. |
 | J — Misc UI tweaks | **Upstream PR(s)** | File individually as makes sense. |
 | K — PR #778 (default-view-mode) | **Already open upstream** | Just ride it in; nudge if stale. |
 
@@ -242,14 +242,20 @@ cargo build --release --features serve && cp target/release/aoe ~/.cargo/bin/aoe
 ### Rules to keep this clean
 
 1. **Never merge upstream into anything.** Rebase only.
-2. **No new local-only commits to the AoE fork.** If it's not going upstream, it doesn't belong in this repo. Themes H and I prove the point.
+2. **No new local-only commits to the AoE fork.** If it's not going upstream, it doesn't belong in this repo. Theme I proves the point; Theme H proves the inverse (push the framework upstream, keep the data external).
 3. **One feature = one branch = one PR.** Don't accumulate work into mega-branches.
 4. **Once a PR merges, delete its local branch and rebase the deploy branch immediately.**
 5. **Drain bias:** prioritize PRs by ratio of (commits removed from local) ÷ (review effort). Themes F, G, B clear quickly.
+6. **Fill out the upstream PR template properly on every PR.** The repo's `.github/pull_request_template.md` requires:
+   - Description (what + why)
+   - PR Type checkbox (one of: New Feature / Bug Fix / Refactor / Documentation / Infrastructure)
+   - Checklist (all 4 boxes — code understood, tests pass, docs updated, screenshots for UI)
+   - AI Usage section (which model, what was AI-drafted) and the "I am an AI Agent filling out this form" box if applicable
+   The template warns: deleting the checklist auto-closes the PR. Fill it out, don't strip it.
 
 ## Action items (concrete)
 
-- [ ] **Move Theme H commits out of fork** → `personal-dev/cx-scripts/` (cs-aliases). Revert in fork.
+- [ ] **PR Theme H as `feat/custom-commands`** — pitch upstream as "user-defined custom commands / functions" (extension point). Pitch line: "I'm using this for an account switcher / launcher; would be great as a first-class feature." Once merged, our cs-aliases live as user-side config that uses the new feature — no more fork commits.
 - [ ] **Move Theme I commits out of fork** → `personal-dev/claude-hooks/`. Revert in fork. (Most content already lives there; fork copies are stale duplicates.)
 - [ ] PR Theme F (`feat/spawn-pickers`) — easiest first PR.
 - [ ] PR Theme G individually (4 tiny fixes — headless, send-keys separator, send_message profile save).
