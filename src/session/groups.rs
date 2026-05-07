@@ -694,6 +694,23 @@ pub fn flatten_tree_all_profiles(
     items
 }
 
+/// Flat session list for the Attention sort: skip group hierarchy entirely.
+/// Attention is a cross-cutting priority view, not a folder tree, so a
+/// Waiting session in group A should sort next to a Waiting session in
+/// group B without a header row breaking the tier ordering. Pre-filter
+/// `instances` by profile/storage at the call site; this function honors
+/// whatever slice it receives.
+pub fn flatten_sessions_by_attention(instances: &[Instance]) -> Vec<Item> {
+    let mut refs: Vec<&Instance> = instances.iter().collect();
+    refs.sort_by_key(|i| attention_session_key(i));
+    refs.into_iter()
+        .map(|inst| Item::Session {
+            id: inst.id.clone(),
+            depth: 0,
+        })
+        .collect()
+}
+
 pub fn flatten_tree(
     group_tree: &GroupTree,
     instances: &[Instance],

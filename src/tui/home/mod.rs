@@ -15,8 +15,8 @@ use tui_input::Input;
 
 use crate::session::{
     config::{load_config, save_config, GroupByMode, SortOrder},
-    flatten_tree, flatten_tree_all_profiles, resolve_config, DefaultTerminalMode, Group, GroupTree,
-    Instance, Item, Storage,
+    flatten_sessions_by_attention, flatten_tree, flatten_tree_all_profiles, resolve_config,
+    DefaultTerminalMode, Group, GroupTree, Instance, Item, Storage,
 };
 // Re-export for sibling modules (render, input, tests) that reference `super::ViewMode`.
 pub use crate::session::config::ViewMode;
@@ -1194,6 +1194,22 @@ impl HomeView {
     }
 
     pub(super) fn build_flat_items(&self) -> Vec<Item> {
+        // Attention sort is a flat priority view: skip groups entirely so
+        // Waiting/Error rows from different groups can interleave by tier
+        // instead of being walled off behind group headers.
+        if self.sort_order == SortOrder::Attention {
+            let filtered: Vec<Instance> = if let Some(profile) = &self.active_profile {
+                self.instances
+                    .iter()
+                    .filter(|i| i.source_profile == *profile)
+                    .cloned()
+                    .collect()
+            } else {
+                self.instances.clone()
+            };
+            return flatten_sessions_by_attention(&filtered);
+        }
+
         if self.group_by == GroupByMode::Project {
             return self.build_flat_items_by_project();
         }
