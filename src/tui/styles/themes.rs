@@ -123,19 +123,13 @@ impl Theme {
             hint: Color::Rgb(148, 163, 184),
 
             running: Color::Rgb(34, 197, 94),
-            // Was Rgb(251, 191, 36): downsamples to xterm-256 idx 214
-            // (#FFAF00, orange) under color_mode=palette, making every
-            // Status::Waiting row visually collide with theme.accent
-            // (also orange). Tuned to (255, 215, 0) so the cube axis
-            // resolves to idx 220 (#FFD700, gold) — clearly yellow in both
-            // truecolor and palette, distinct from accent.
-            waiting: Color::Rgb(255, 215, 0),
+            waiting: Color::Rgb(251, 191, 36),
             idle: Color::Rgb(100, 116, 139),
             error: Color::Rgb(239, 68, 68),
             terminal_active: Color::Rgb(13, 148, 136),
 
             group: Color::Rgb(203, 213, 225),
-            search: Color::Rgb(255, 215, 0),
+            search: Color::Rgb(251, 191, 36),
             accent: Color::Rgb(217, 119, 6),
 
             diff_add: Color::Rgb(34, 197, 94),
@@ -164,11 +158,7 @@ impl Theme {
             hint: Color::Rgb(100, 160, 120),
 
             running: Color::Rgb(0, 255, 180),
-            // Was Rgb(255, 180, 60): downsamples to xterm-256 idx 215
-            // (#FFAF5F, orange) under color_mode=palette. Tuned to
-            // (255, 215, 0) so the cube axis resolves to idx 220
-            // (#FFD700, gold) — distinct from accent and clearly yellow.
-            waiting: Color::Rgb(255, 215, 0),
+            waiting: Color::Rgb(255, 180, 60),
             idle: Color::Rgb(60, 100, 70),
             error: Color::Rgb(255, 100, 80),
             terminal_active: Color::Rgb(130, 170, 255),
@@ -179,10 +169,10 @@ impl Theme {
 
             diff_add: Color::Rgb(0, 255, 180),
             diff_delete: Color::Rgb(255, 100, 80),
-            diff_modified: Color::Rgb(255, 215, 0),
+            diff_modified: Color::Rgb(255, 180, 60),
             diff_header: Color::Rgb(100, 160, 200),
 
-            help_key: Color::Rgb(255, 215, 0),
+            help_key: Color::Rgb(255, 180, 60),
 
             branch: Color::Rgb(100, 160, 200),
             sandbox: Color::Rgb(200, 122, 255),
