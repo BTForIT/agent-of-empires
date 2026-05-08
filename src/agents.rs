@@ -118,7 +118,7 @@ const CLAUDE_CURSOR_HOOK_EVENTS: &[HookEvent] = &[
     HookEvent {
         name: "Stop",
         matcher: None,
-        status: Some("waiting"),
+        status: Some("idle"),
     },
     HookEvent {
         name: "Notification",
