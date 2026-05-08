@@ -1950,10 +1950,7 @@ impl HomeView {
     /// trigger destructive home-view shortcuts ('b' spawns cxs, 'q' quits…).
     /// Capture it into a send_message dialog targeting the selected session.
     pub fn handle_paste(&mut self, text: &str) {
-        if let Some(ref mut settings) = self.settings_view {
-            settings.handle_paste(text);
-            return;
-        }
+        // Active text-input dialogs win first — user is explicitly typing into them.
         if let Some(ref mut dialog) = self.rename_dialog {
             dialog.handle_paste(text);
             return;
@@ -1967,13 +1964,11 @@ impl HomeView {
             return;
         }
 
-        // No dialog open — try to route the paste into a compose dialog.
-        // If the cursor is on a running session, use it. Otherwise fall back
-        // to any running session (the most recent one is typically what voice
-        // dictation is targeting). If we still can't route, stash the text in
-        // pending_paste so the next 'm' press picks it up. Never throw voice
-        // text on the floor with a scolding info dialog — losing dictation is
-        // far worse than silently catching it.
+        // Default for voice/dictation: open a compose dialog targeting a running
+        // session, even if the settings view is up. The settings list view itself
+        // doesn't have a text input — its only paste sink (settings/input.rs:825)
+        // strips newlines, which destroys multi-line dictation. Documented behavior
+        // (help.rs:109) is "Paste → Capture → compose dialog".
         if let Some((id, title)) = self.resolve_paste_target() {
             self.pending_send_session = Some(id);
             let mut dialog = SendMessageDialog::new(&title);
@@ -1982,8 +1977,14 @@ impl HomeView {
             return;
         }
 
-        // No running sessions at all (or all Creating). Stash for later;
-        // the user will see the text on next 'm' / dialog open.
+        // No running session — fall back to settings if it's open (graceful
+        // degradation; the settings paste handler will sanitize newlines but at
+        // least the text isn't lost). Otherwise stash in pending_paste for the
+        // next 'm' / dialog open.
+        if let Some(ref mut settings) = self.settings_view {
+            settings.handle_paste(text);
+            return;
+        }
         match self.pending_paste.as_mut() {
             Some(buf) => buf.push_str(text),
             None => self.pending_paste = Some(text.to_string()),
