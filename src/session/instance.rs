@@ -1375,7 +1375,43 @@ impl Instance {
         let session = self.tmux_session()?;
 
         if session.exists() {
+            // Dead-pane case: `remain-on-exit on` keeps the tmux session
+            // alive after the agent process exits, leaving a frozen pane.
+            // The vanilla kill-session + new-session flow can race against
+            // the 2-second session cache (kill_process_tree on a defunct
+            // pid stalls on macOS, and the subsequent kill-session can
+            // run while start's exists() check still sees the cached
+            // entry), leaving the dead pane in place — this is the bug
+            // users hit when `e/E/F5` "doesn't restart anything".
+            //
+            // For dead panes we take the cx-restart path: respawn the
+            // pane in place into a shell, preserving the tmux session
+            // (so attached clients stay attached and tmux env stays
+            // intact). The kill below then sees a live pane and tears
+            // it down cleanly, and start_with_size_opts recreates the
+            // session with the agent command. The respawn step
+            // unblocks the kill path that was hanging on the dead pid.
+            if session.is_pane_dead() {
+                tracing::info!(
+                    "restart: pane dead for session {} (remain-on-exit), \
+                     respawning shell before recreate",
+                    session.name()
+                );
+                if let Err(e) = session.respawn_dead_pane(&self.project_path, Some("zsh")) {
+                    tracing::warn!(
+                        "respawn_dead_pane failed for {}: {} -- falling back to kill+start",
+                        session.name(),
+                        e
+                    );
+                }
+            }
             session.kill()?;
+            // Force the session cache to drop any stale "exists=true"
+            // entry from the 2-second window so start_with_size_opts
+            // sees the post-kill state immediately. kill() already
+            // refreshes, but an explicit refresh here is defensive
+            // against future caching changes.
+            crate::tmux::refresh_session_cache();
             std::thread::sleep(std::time::Duration::from_millis(100));
         }
 
