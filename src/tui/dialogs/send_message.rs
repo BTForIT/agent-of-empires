@@ -71,7 +71,8 @@ impl SendMessageDialog {
         // capped to viewport so the popover never paints under the iOS soft
         // keyboard if Event::Resize lands mid-render.
         let content_lines = self.text_area.lines().len() as u16;
-        let height = (content_lines + 2).clamp(3, 12).min(area.height.max(3));
+        // Don't force a 3-row floor; viewport may be smaller than 3 rows (iPhone portrait + soft keyboard).
+        let height = (content_lines + 2).clamp(3, 12).min(area.height);
         // 80% of viewport, capped at 80 cols to avoid sprawl, floored at 26
         // so the bottom hints (" Enter send Esc cancel ") stay legible.
         // Below 26 cols (iPhone-portrait Mosh w/ keyboard) take the full
