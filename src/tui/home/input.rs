@@ -2011,6 +2011,14 @@ impl HomeView {
     /// Resolve a target session id + title for an untargeted paste/type-burst.
     /// Priority: currently-selected running session, then first running session
     /// under the selected group, then any first running session.
+    ///
+    /// Selection-respecting rule: if the user has a session selected but it
+    /// is not runnable (archived, tmux gone), this returns None instead of
+    /// falling through to "first running session." Silent fall-through
+    /// caused voice/dictation pastes to land in an unrelated session
+    /// (commonly wma-CRM) when the user was navigated to an archived row,
+    /// which is worse than losing the paste — the upstream layer stashes
+    /// to pending_paste so the text is preserved for the next dialog open.
     fn resolve_paste_target(&self) -> Option<(String, String)> {
         let pick = |inst: &crate::session::Instance| -> Option<(String, String)> {
             if inst.status == Status::Creating {
@@ -2026,13 +2034,18 @@ impl HomeView {
 
         if let Some(id) = self.selected_session.clone() {
             if let Some(inst) = self.get_instance(&id) {
-                if let Some(t) = pick(inst) {
-                    return Some(t);
-                }
+                // Honor explicit selection: return whatever pick() decides
+                // (Some if runnable, None if archived/tmux-gone). Do NOT
+                // fall through to first-running — the user picked this row
+                // intentionally, and rerouting would silently mis-land the
+                // paste in a sibling session.
+                return pick(inst);
             }
+            // Selected id points to a missing instance (deleted underneath
+            // us). Fall through to first-running as a defensive recovery.
         }
 
-        // Fall back to any running session in the current view.
+        // No selection at all: pick any running session in the current view.
         for inst in self.instances() {
             if let Some(t) = pick(inst) {
                 return Some(t);
