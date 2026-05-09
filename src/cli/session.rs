@@ -50,8 +50,10 @@ pub enum SessionCommands {
     Current(CurrentArgs),
 
     /// Archive a session (sinks it to the bottom of the Attention sort,
-    /// rendered in italic+dim; remains visible).
-    Archive(SessionIdArgs),
+    /// rendered in italic+dim; remains visible). Default kills the tmux
+    /// pane process so an archived session stops consuming resources;
+    /// pass `--no-kill` to opt out and keep the pane running.
+    Archive(ArchiveArgs),
 
     /// Unarchive a session (clears archived_at).
     Unarchive(SessionIdArgs),
@@ -188,6 +190,19 @@ pub struct SetSessionIdArgs {
     session_id: String,
 }
 
+#[derive(Args)]
+pub struct ArchiveArgs {
+    /// Session ID or title
+    pub identifier: String,
+    /// Sink-only: skip killing the tmux pane on archive. Default behavior
+    /// is to terminate the agent process (the pane stays as a remain-on-exit
+    /// corpse) so an archived session stops consuming resources. Pass
+    /// `--no-kill` for the rare case where you want the pane to keep
+    /// running while sunk in the Attention sort.
+    #[arg(long)]
+    pub no_kill: bool,
+}
+
 #[derive(Serialize)]
 struct SessionDetails {
     id: String,
@@ -212,8 +227,8 @@ pub async fn run(profile: &str, command: SessionCommands) -> Result<()> {
         SessionCommands::Capture(args) => capture_session(profile, args).await,
         SessionCommands::Rename(args) => rename_session(profile, args).await,
         SessionCommands::Current(args) => current_session(args).await,
-        SessionCommands::Archive(args) => set_session_archived(profile, args, true).await,
-        SessionCommands::Unarchive(args) => set_session_archived(profile, args, false).await,
+        SessionCommands::Archive(args) => archive_session(profile, args).await,
+        SessionCommands::Unarchive(args) => unarchive_session(profile, args).await,
         SessionCommands::Favorite(args) => set_session_favorited(profile, args, true).await,
         SessionCommands::Unfavorite(args) => set_session_favorited(profile, args, false).await,
         SessionCommands::Snooze(args) => snooze_session(profile, args).await,
@@ -311,7 +326,7 @@ async fn set_session_favorited(profile: &str, args: SessionIdArgs, favorited: bo
     Ok(())
 }
 
-async fn set_session_archived(profile: &str, args: SessionIdArgs, archived: bool) -> Result<()> {
+async fn archive_session(profile: &str, args: ArchiveArgs) -> Result<()> {
     let storage = Storage::new(profile)?;
     let (mut instances, groups) = storage.load_with_groups()?;
 
@@ -324,18 +339,79 @@ async fn set_session_archived(profile: &str, args: SessionIdArgs, archived: bool
         })
         .ok_or_else(|| anyhow::anyhow!("Session not found: {}", args.identifier))?;
 
-    if archived {
-        instances[idx].archive();
-    } else {
-        instances[idx].unarchive();
-    }
+    let was_archived = instances[idx].is_archived();
+    instances[idx].archive();
     let title = instances[idx].title.clone();
+    let session_id = instances[idx].id.clone();
+
+    // None → Some transition: kill the tmux pane process so the agent
+    // stops consuming resources. With remain-on-exit on, the pane stays
+    // around as a corpse and `aoe session unarchive` (Piece 2 below) or
+    // `aoe session restart` (Piece 1) will respawn it.
+    //
+    // Already-archived → archive is a no-op for the kill: pane was
+    // already killed on the first archive.
+    if !was_archived && !args.no_kill {
+        let tmux_session = crate::tmux::Session::new(&session_id, &title)?;
+        if tmux_session.exists() {
+            if let Err(e) = tmux_session.kill_pane() {
+                eprintln!(
+                    "Warning: failed to kill pane for archived session '{}': {}",
+                    title, e
+                );
+            }
+        }
+    }
 
     let group_tree = GroupTree::new_with_groups(&instances, &groups);
     storage.save_with_groups(&instances, &group_tree)?;
 
-    let verb = if archived { "Archived" } else { "Unarchived" };
-    println!("✓ {} session: {}", verb, title);
+    println!("✓ Archived session: {}", title);
+    Ok(())
+}
+
+async fn unarchive_session(profile: &str, args: SessionIdArgs) -> Result<()> {
+    let storage = Storage::new(profile)?;
+    let (mut instances, groups) = storage.load_with_groups()?;
+
+    let idx = instances
+        .iter()
+        .position(|i| {
+            i.id == args.identifier
+                || i.id.starts_with(&args.identifier)
+                || i.title == args.identifier
+        })
+        .ok_or_else(|| anyhow::anyhow!("Session not found: {}", args.identifier))?;
+
+    let was_archived = instances[idx].is_archived();
+    instances[idx].unarchive();
+    let title = instances[idx].title.clone();
+    let session_id = instances[idx].id.clone();
+    let tool = instances[idx].tool.clone();
+
+    // Some → None transition: respawn the pane and send the resume
+    // message. Mirrors restart_session's pane_dead branch (Piece 1):
+    // the on-archive kill leaves a remain-on-exit corpse, so unarchive
+    // is the inverse — revive it. Cwd recovery uses the same three-step
+    // chain (sidecar → session-name → $HOME).
+    if was_archived {
+        let tmux_session = crate::tmux::Session::new(&session_id, &title)?;
+        if tmux_session.exists() && tmux_session.is_pane_dead() {
+            let cwd = recover_cwd_for_session(&tmux_session, &title);
+            tmux_session.respawn_dead_pane(&cwd, Some("zsh"))?;
+            tmux_session.wait_for_shell_prompt(std::time::Duration::from_secs(5))?;
+            let delay = crate::agents::send_keys_enter_delay(&tool);
+            let resume_msg = "wake up — pick up what you were doing";
+            if let Err(e) = tmux_session.send_keys_with_delay(resume_msg, delay) {
+                eprintln!("Warning: failed to send resume message: {}", e);
+            }
+        }
+    }
+
+    let group_tree = GroupTree::new_with_groups(&instances, &groups);
+    storage.save_with_groups(&instances, &group_tree)?;
+
+    println!("✓ Unarchived session: {}", title);
     Ok(())
 }
 

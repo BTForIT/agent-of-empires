@@ -231,6 +231,25 @@ impl Session {
         );
     }
 
+    /// Kill the agent process inside the pane WITHOUT tearing down the
+    /// tmux session. With `remain-on-exit on` (which AoE always sets), the
+    /// pane survives as a "Pane is dead" corpse, ready to be respawned by
+    /// `respawn_dead_pane()`. Used by archive=kill: stops the agent from
+    /// consuming resources while the row sits sunk in the Attention sort.
+    /// Idempotent: no-op if the session doesn't exist or has no pane pid.
+    pub fn kill_pane(&self) -> Result<()> {
+        if !self.exists() {
+            return Ok(());
+        }
+        if let Some(pane_pid) = self.get_pane_pid() {
+            process::kill_process_tree(pane_pid);
+        }
+        // Don't refresh the session cache here — the tmux session itself
+        // is unchanged; only the pane process is gone. Status_poller will
+        // pick up pane_dead on its next tick.
+        Ok(())
+    }
+
     pub fn kill(&self) -> Result<()> {
         if !self.exists() {
             return Ok(());
