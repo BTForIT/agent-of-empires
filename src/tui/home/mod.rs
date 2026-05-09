@@ -290,6 +290,14 @@ impl HomeView {
             .map(|i| (i.id.clone(), i.clone()))
             .collect();
 
+        // One-shot sweep of orphaned /tmp/aoe-hooks/<id>/ dirs left behind
+        // by sessions destroyed while the TUI was not running. Per-session
+        // cleanup on destroy is handled by cleanup_hook_status_dir in
+        // src/session/deletion.rs; this is the catch-up pass.
+        let live_ids: std::collections::HashSet<String> =
+            instance_map.keys().cloned().collect();
+        crate::hooks::sweep_orphaned_hook_dirs(&live_ids);
+
         // In unified mode, config comes from "default" profile
         let config_profile = active_profile.as_deref().unwrap_or("default");
         let resolved = resolve_config(config_profile);
