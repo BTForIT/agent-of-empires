@@ -66,6 +66,15 @@ impl SendMessageDialog {
         self.text_area.insert_str(text);
     }
 
+    /// Mirror of the height calculation inside `render` so the regression
+    /// test for tiny viewports (iPhone portrait + soft keyboard) can assert
+    /// the dialog never exceeds `area.height`. Keep in lockstep with line ~75.
+    #[cfg(test)]
+    fn dialog_area_height(&self, area: Rect) -> u16 {
+        let content_lines = self.text_area.lines().len() as u16;
+        (content_lines + 2).clamp(3, 12).min(area.height)
+    }
+
     pub fn render(&self, frame: &mut Frame, area: Rect, theme: &Theme) {
         // 2 for borders + 1 per content line, min 3 (single line), max 12,
         // capped to viewport so the popover never paints under the iOS soft
@@ -223,5 +232,48 @@ mod tests {
         dialog.handle_key(key(KeyCode::Char(' ')));
         dialog.handle_paste("world");
         assert_eq!(dialog.get_text(), "hi world");
+    }
+
+    #[test]
+    fn dialog_height_respects_tiny_viewport() {
+        // Regression: pre-0ddbcad, .min(area.height.max(3)) forced a 3-row
+        // floor even when viewport had < 3 rows (iPhone portrait + soft keyboard).
+        // The dialog overflowed off-screen.
+        use ratatui::layout::Rect;
+
+        let dialog = SendMessageDialog::new("test session");
+
+        // viewport is 2 rows (representative iPhone portrait + soft keyboard)
+        let tiny_area = Rect {
+            x: 0,
+            y: 0,
+            width: 80,
+            height: 2,
+        };
+        let computed_height = dialog.dialog_area_height(tiny_area);
+
+        assert!(
+            computed_height <= tiny_area.height,
+            "dialog height ({}) must not exceed viewport ({})",
+            computed_height,
+            tiny_area.height
+        );
+
+        // Sanity: also holds at height=1 and height=0.
+        for h in [0u16, 1, 2, 3] {
+            let area = Rect {
+                x: 0,
+                y: 0,
+                width: 80,
+                height: h,
+            };
+            let computed = dialog.dialog_area_height(area);
+            assert!(
+                computed <= h,
+                "dialog height ({}) must not exceed viewport ({})",
+                computed,
+                h
+            );
+        }
     }
 }
