@@ -29,6 +29,11 @@ export interface SessionResponse {
   archived_at: string | null;
   favorited_at: string | null;
   snoozed_until: string | null;
+  /** True when this is a Claude Code session AND the user has enabled
+   *  Claude's fullscreen renderer (`tui: "fullscreen"` in
+   *  ~/.claude/settings.json). The mobile rendering path uses this to
+   *  skip scrollback-tracking workarounds that target tmux copy-mode. */
+  claude_fullscreen: boolean;
 }
 
 export interface CleanupDefaults {

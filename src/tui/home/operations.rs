@@ -111,6 +111,26 @@ impl HomeView {
             inst.status = snapshot.status;
         });
         self.save()?;
+
+        // Mirror the CLI `aoe session restart` behavior: after the agent has
+        // had a moment to come back up, send a wake-up prompt so it resumes
+        // whatever it was doing without manual nudging.
+        let title = snapshot.title.clone();
+        let session_id = snapshot.id.clone();
+        let tool = snapshot.tool.clone();
+        std::thread::sleep(std::time::Duration::from_millis(2000));
+        let tmux_session = crate::tmux::Session::new(&session_id, &title)?;
+        if tmux_session.exists() {
+            let delay = crate::agents::send_keys_enter_delay(&tool);
+            let wake_msg = "wake up — pick up what you were doing";
+            if let Err(e) = tmux_session.send_keys_with_delay(wake_msg, delay) {
+                tracing::warn!("failed to send wake-up message after restart: {}", e);
+            } else {
+                self.mutate_instance(&session_id, |inst| {
+                    inst.touch_last_accessed();
+                });
+            }
+        }
         Ok(())
     }
 
@@ -226,11 +246,11 @@ impl HomeView {
         Ok(None)
     }
 
-    /// Handle `w`/`W` on the cursor's session. If already snoozed, wake
-    /// it immediately (no picker — the user just wants it back). Otherwise
-    /// open the duration picker (`SnoozeDurationDialog`) so they can choose
-    /// 30 min / 1 hr / 24 hr before the row sinks. The actual snooze runs
-    /// in `snooze_session_for` once the dialog submits.
+    /// Handle `h`/`H`/`w`/`W` on the cursor's session. If already snoozed,
+    /// wake it immediately (no picker — the user just wants it back).
+    /// Otherwise open the duration picker (`SnoozeDurationDialog`) so they
+    /// can choose 1-6 hours / 1 day / 1 week before the row sinks. The
+    /// actual snooze runs in `snooze_session_for` once the dialog submits.
     ///
     /// Snooze semantics: "temporary archive" — sets `snoozed_until = now +
     /// minutes`, the row sinks to tier 99 alongside archived rows, renders

@@ -36,7 +36,11 @@ impl HomeView {
         self.list_area.contains(Position::from((col, row)))
     }
 
-    pub fn handle_key(&mut self, key: KeyEvent) -> Option<Action> {
+    pub fn handle_key(
+        &mut self,
+        key: KeyEvent,
+        update_info: Option<&crate::update::UpdateInfo>,
+    ) -> Option<Action> {
         // Handle unsaved changes confirmation for settings (shown over settings view)
         if self.settings_close_confirm {
             if let Some(dialog) = &mut self.confirm_dialog {
@@ -548,6 +552,23 @@ impl HomeView {
             return None;
         }
 
+        if let Some(dialog) = &mut self.update_confirm_dialog {
+            use crate::tui::dialogs::DialogResult;
+            match dialog.handle_key(key) {
+                DialogResult::Continue => {}
+                DialogResult::Cancel => {
+                    self.update_confirm_dialog = None;
+                }
+                DialogResult::Submit(()) => {
+                    let method = dialog.method.clone();
+                    let version = dialog.latest_version.clone();
+                    self.update_confirm_dialog = None;
+                    return Some(Action::SpawnUpdate(method, version));
+                }
+            }
+            return None;
+        }
+
         // Search mode
         if self.search_active {
             match key.code {
@@ -576,7 +597,8 @@ impl HomeView {
         // equivalents so the match block below doesn't need duplication.
         //
         // Mapping (strict mode only):
-        //   Shift+letter actions -> lowercase: N->n, X->x, D->d, R->r, S->s, M->m, T->t, C->c, Q->q, O->o
+        //   Shift+letter actions -> pass through unchanged: each has its own
+        //     `Char('UPPER') if self.strict_hotkeys` arm in the main match.
         //   Ctrl+letter relocated bindings -> uppercase: Ctrl+T->T, Ctrl+D->D, Ctrl+R->R, Ctrl+P->P, Ctrl+N->N
         //   Ctrl+G -> g (group toggle was lowercase)
         //   Bare lowercase action letters -> blocked (return None)
@@ -688,6 +710,23 @@ impl HomeView {
                 }
             }
             KeyCode::Char('W') if self.strict_hotkeys => {
+                if let Err(e) = self.toggle_snooze_at_cursor() {
+                    tracing::error!("toggle_snooze_at_cursor failed: {}", e);
+                }
+            }
+            // `h` / `H` — alias for `w` / `W` (snooze). Mnemonic: Hide,
+            // borrowed from email-app conventions where H snoozes the
+            // focused message off the list for a while. Plain `h` was
+            // previously a vim-style left/collapse alias, but ← already
+            // covers that — and users with email-app muscle memory keep
+            // reaching for H expecting snooze. `w`/`W` stays functional
+            // for backward compat; `h`/`H` is the advertised binding.
+            KeyCode::Char('h') if !self.strict_hotkeys => {
+                if let Err(e) = self.toggle_snooze_at_cursor() {
+                    tracing::error!("toggle_snooze_at_cursor failed: {}", e);
+                }
+            }
+            KeyCode::Char('H') if self.strict_hotkeys => {
                 if let Err(e) = self.toggle_snooze_at_cursor() {
                     tracing::error!("toggle_snooze_at_cursor failed: {}", e);
                 }
@@ -1075,6 +1114,50 @@ impl HomeView {
                     }
                 }
             }
+            KeyCode::Char('u') => {
+                if let Some(info) = update_info {
+                    if info.available && self.update_confirm_dialog.is_none() {
+                        let method = match crate::update::install::detect_install_method() {
+                            Ok(m) => m,
+                            Err(e) => {
+                                tracing::warn!("update detection failed: {e}");
+                                return None;
+                            }
+                        };
+                        use crate::update::install::InstallMethod;
+                        if !matches!(
+                            &method,
+                            InstallMethod::Homebrew | InstallMethod::Tarball { .. }
+                        ) {
+                            let msg = match &method {
+                                InstallMethod::Nix => {
+                                    "Nix install: run `nix run github:njbrake/agent-of-empires` to update".to_string()
+                                }
+                                InstallMethod::Cargo => {
+                                    "Cargo install: run `cargo install --git https://github.com/njbrake/agent-of-empires aoe`".to_string()
+                                }
+                                InstallMethod::Unknown { .. } => {
+                                    "Unknown install method: run `aoe update` in a terminal for instructions".to_string()
+                                }
+                                _ => unreachable!(),
+                            };
+                            return Some(Action::SetTransientStatus(msg));
+                        }
+                        let needs_sudo = matches!(
+                            &method,
+                            InstallMethod::Tarball { binary_path }
+                                if !crate::update::install::parent_is_writable(binary_path)
+                        );
+                        self.update_confirm_dialog =
+                            Some(crate::tui::dialogs::UpdateConfirmDialog::new(
+                                info.current_version.clone(),
+                                info.latest_version.clone(),
+                                method,
+                                needs_sudo,
+                            ));
+                    }
+                }
+            }
             KeyCode::Char('D') if !self.strict_hotkeys => {
                 // Open diff view - requires a selected session
                 let Some(session_id) = &self.selected_session else {
@@ -1448,38 +1531,10 @@ impl HomeView {
                 }
             }
             KeyCode::Char('m') if !self.strict_hotkeys => {
-                if let Some(id) = self.selected_session.clone() {
-                    if let Some(inst) = self.get_instance(&id) {
-                        if inst.status == Status::Creating {
-                            return None;
-                        }
-                        let title = inst.title.clone();
-                        let inst_id = inst.id.clone();
-                        let tmux_session = crate::tmux::Session::new(&inst_id, &title).ok();
-                        let is_running = tmux_session.as_ref().is_some_and(|s| s.exists());
-                        if is_running {
-                            self.pending_send_session = Some(id);
-                            self.send_message_dialog = Some(SendMessageDialog::new(&title));
-                        }
-                    }
-                }
+                self.open_send_message_dialog();
             }
             KeyCode::Char('M') if self.strict_hotkeys => {
-                if let Some(id) = self.selected_session.clone() {
-                    if let Some(inst) = self.get_instance(&id) {
-                        if inst.status == Status::Creating {
-                            return None;
-                        }
-                        let title = inst.title.clone();
-                        let inst_id = inst.id.clone();
-                        let tmux_session = crate::tmux::Session::new(&inst_id, &title).ok();
-                        let is_running = tmux_session.as_ref().is_some_and(|s| s.exists());
-                        if is_running {
-                            self.pending_send_session = Some(id);
-                            self.send_message_dialog = Some(SendMessageDialog::new(&title));
-                        }
-                    }
-                }
+                self.open_send_message_dialog();
             }
             KeyCode::Char('o') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                 self.apply_sort_order(self.sort_order.cycle_reverse());
@@ -1570,13 +1625,17 @@ impl HomeView {
                     self.toggle_group_collapsed(&path);
                 }
             }
-            KeyCode::Char('H') | KeyCode::Char('<') => {
+            // `<` shrinks the list pane width; `>` grows it. Capital
+            // H/L used to be aliases here but H is now the advertised
+            // snooze key (mnemonic: Hide), so width controls live on
+            // the angle-bracket characters only.
+            KeyCode::Char('<') => {
                 self.shrink_list();
             }
-            KeyCode::Char('L') | KeyCode::Char('>') => {
+            KeyCode::Char('>') => {
                 self.grow_list();
             }
-            KeyCode::Left | KeyCode::Char('h') => {
+            KeyCode::Left => {
                 if let Some(Item::Group {
                     path, collapsed, ..
                 }) = self.flat_items.get(self.cursor)
@@ -1598,6 +1657,15 @@ impl HomeView {
                     }
                 }
             }
+            // Upstream PR #796 added `w` for jump-to-next-waiting after the
+            // snooze feature (a19337b) had already taken `w`/`W`. In non-strict
+            // mode the snooze arm at line 707 catches first, so this jump arm
+            // was always dead. In strict mode it leaked through and preempted
+            // the typing-guard below — bare `w` jumped the cursor instead of
+            // opening compose like every other lowercase letter. Gate it.
+            KeyCode::Char('w') if !self.strict_hotkeys => {
+                self.jump_to_next_waiting();
+            }
             // Strict-mode typing guard: any bare lowercase letter that isn't a
             // navigation key (j/k/h/l) is treated as inadvertent typing — open
             // the compose dialog pre-filled with that character instead of
@@ -1613,6 +1681,73 @@ impl HomeView {
         }
 
         None
+    }
+
+    fn jump_to_next_waiting(&mut self) {
+        let len = self.flat_items.len();
+        if len == 0 {
+            return;
+        }
+
+        // Pass 1: forward-walk from cursor+1, wrapping, for the next Waiting session.
+        let start = (self.cursor + 1) % len;
+        for i in 0..len - 1 {
+            let idx = (start + i) % len;
+            let id = match self.flat_items.get(idx) {
+                Some(Item::Session { id, .. }) => id.clone(),
+                _ => continue,
+            };
+            if let Some(inst) = self.get_instance(&id) {
+                if inst.status == Status::Waiting {
+                    self.cursor = idx;
+                    self.update_selected();
+                    return;
+                }
+            }
+        }
+
+        // Pass 2: fall back to the most-recently-accessed Idle session, skipping
+        // the cursor. Sessions never attached (last_accessed_at == None) rank
+        // last but remain eligible.
+        let mut best: Option<(usize, Option<chrono::DateTime<chrono::Utc>>)> = None;
+        for idx in 0..len {
+            if idx == self.cursor {
+                continue;
+            }
+            let id = match self.flat_items.get(idx) {
+                Some(Item::Session { id, .. }) => id.clone(),
+                _ => continue,
+            };
+            let Some(inst) = self.get_instance(&id) else {
+                continue;
+            };
+            if inst.status != Status::Idle {
+                continue;
+            }
+            let ts = inst.last_accessed_at;
+            let beats = match best {
+                None => true,
+                Some((_, b)) => match (ts, b) {
+                    (Some(a), Some(b)) => a > b,
+                    (Some(_), None) => true,
+                    (None, _) => false,
+                },
+            };
+            if beats {
+                best = Some((idx, ts));
+            }
+        }
+
+        if let Some((idx, _)) = best {
+            self.cursor = idx;
+            self.update_selected();
+            return;
+        }
+
+        self.info_dialog = Some(InfoDialog::new(
+            "No Available Sessions",
+            "No sessions are currently waiting or idle.",
+        ));
     }
 
     pub(super) fn move_cursor(&mut self, delta: i32) {
@@ -1730,8 +1865,13 @@ impl HomeView {
             self.move_cursor(-1);
             return true;
         }
-        if !self.hit_preview(col, row) || self.selected_session.is_none() {
+        if !self.hit_preview(col, row) {
             return false;
+        }
+        // Wheel over preview with no session selected — fall through to list nav.
+        if self.selected_session.is_none() {
+            self.move_cursor(-1);
+            return true;
         }
 
         let active_cache = match self.view_mode {
@@ -1762,7 +1902,9 @@ impl HomeView {
         let new_offset = self.preview_scroll_offset.saturating_add(STEP);
         let clamped = new_offset.min(real_max);
         if clamped == self.preview_scroll_offset {
-            return false;
+            // Preview already at top — fall through to list nav so the wheel isn't a no-op.
+            self.move_cursor(-1);
+            return true;
         }
         self.preview_scroll_offset = clamped;
         true
@@ -1782,11 +1924,18 @@ impl HomeView {
             self.move_cursor(1);
             return true;
         }
-        if !self.hit_preview(col, row) || self.selected_session.is_none() {
+        if !self.hit_preview(col, row) {
             return false;
         }
+        // Wheel over preview with no session selected — fall through to list nav.
+        if self.selected_session.is_none() {
+            self.move_cursor(1);
+            return true;
+        }
         if self.preview_scroll_offset == 0 {
-            return false;
+            // Preview already at bottom — fall through to list nav so the wheel isn't a no-op.
+            self.move_cursor(1);
+            return true;
         }
         self.preview_scroll_offset = self.preview_scroll_offset.saturating_sub(STEP);
         true
@@ -1801,10 +1950,7 @@ impl HomeView {
     /// trigger destructive home-view shortcuts ('b' spawns cxs, 'q' quits…).
     /// Capture it into a send_message dialog targeting the selected session.
     pub fn handle_paste(&mut self, text: &str) {
-        if let Some(ref mut settings) = self.settings_view {
-            settings.handle_paste(text);
-            return;
-        }
+        // Active text-input dialogs win first — user is explicitly typing into them.
         if let Some(ref mut dialog) = self.rename_dialog {
             dialog.handle_paste(text);
             return;
@@ -1818,37 +1964,95 @@ impl HomeView {
             return;
         }
 
-        // No dialog open — capture into a send_message dialog if a running
-        // session is selected. Otherwise surface an info dialog so the paste
-        // is never silently dropped on the floor.
-        if let Some(id) = self.selected_session.clone() {
-            if let Some(inst) = self.get_instance(&id) {
-                if inst.status == Status::Creating {
-                    return;
-                }
-                let title = inst.title.clone();
-                let inst_id = inst.id.clone();
-                let tmux_session = crate::tmux::Session::new(&inst_id, &title).ok();
-                let is_running = tmux_session.as_ref().is_some_and(|s| s.exists());
-                if is_running {
-                    self.pending_send_session = Some(id);
-                    let mut dialog = SendMessageDialog::new(&title);
-                    dialog.handle_paste(text);
-                    self.send_message_dialog = Some(dialog);
-                    return;
-                }
-            }
+        // Default for voice/dictation: open a compose dialog targeting a running
+        // session, even if the settings view is up. The settings list view itself
+        // doesn't have a text input — its only paste sink (settings/input.rs:825)
+        // strips newlines, which destroys multi-line dictation. Documented behavior
+        // (help.rs:109) is "Paste → Capture → compose dialog".
+        if let Some((id, title)) = self.resolve_paste_target() {
+            self.pending_send_session = Some(id);
+            let mut dialog = SendMessageDialog::new(&title);
+            dialog.handle_paste(text);
+            self.send_message_dialog = Some(dialog);
+            return;
         }
 
-        self.info_dialog = Some(InfoDialog::new(
-            "Paste captured",
-            &format!(
-                "Received {} characters of pasted text but no running session was \
-                 selected to receive it. Select a session and press 'm' to compose, \
-                 then paste again.",
-                text.chars().count()
-            ),
-        ));
+        // No running session — fall back to settings if it's open (graceful
+        // degradation; the settings paste handler will sanitize newlines but at
+        // least the text isn't lost). Otherwise stash in pending_paste for the
+        // next 'm' / dialog open.
+        if let Some(ref mut settings) = self.settings_view {
+            settings.handle_paste(text);
+            return;
+        }
+        match self.pending_paste.as_mut() {
+            Some(buf) => buf.push_str(text),
+            None => self.pending_paste = Some(text.to_string()),
+        }
+    }
+
+    /// Open the send-message dialog for the currently-selected running session.
+    /// If pending_paste has accumulated text from earlier untargeted pastes,
+    /// drain it into the dialog so voice/dictation captured before a session
+    /// was picked still gets used. No-op if no running session is targetable.
+    fn open_send_message_dialog(&mut self) {
+        let Some((id, title)) = self.resolve_paste_target() else {
+            return;
+        };
+        self.pending_send_session = Some(id);
+        let mut dialog = SendMessageDialog::new(&title);
+        if let Some(buf) = self.pending_paste.take() {
+            if !buf.is_empty() {
+                dialog.handle_paste(&buf);
+            }
+        }
+        self.send_message_dialog = Some(dialog);
+    }
+
+    /// Resolve a target session id + title for an untargeted paste/type-burst.
+    /// Priority: currently-selected running session, then first running session
+    /// under the selected group, then any first running session.
+    ///
+    /// Selection-respecting rule: if the user has a session selected but it
+    /// is not runnable (archived, tmux gone), this returns None instead of
+    /// falling through to "first running session." Silent fall-through
+    /// caused voice/dictation pastes to land in an unrelated session
+    /// (commonly wma-CRM) when the user was navigated to an archived row,
+    /// which is worse than losing the paste — the upstream layer stashes
+    /// to pending_paste so the text is preserved for the next dialog open.
+    fn resolve_paste_target(&self) -> Option<(String, String)> {
+        let pick = |inst: &crate::session::Instance| -> Option<(String, String)> {
+            if inst.status == Status::Creating {
+                return None;
+            }
+            let tmux_session = crate::tmux::Session::new(&inst.id, &inst.title).ok();
+            if tmux_session.as_ref().is_some_and(|s| s.exists()) {
+                Some((inst.id.clone(), inst.title.clone()))
+            } else {
+                None
+            }
+        };
+
+        if let Some(id) = self.selected_session.clone() {
+            if let Some(inst) = self.get_instance(&id) {
+                // Honor explicit selection: return whatever pick() decides
+                // (Some if runnable, None if archived/tmux-gone). Do NOT
+                // fall through to first-running — the user picked this row
+                // intentionally, and rerouting would silently mis-land the
+                // paste in a sibling session.
+                return pick(inst);
+            }
+            // Selected id points to a missing instance (deleted underneath
+            // us). Fall through to first-running as a defensive recovery.
+        }
+
+        // No selection at all: pick any running session in the current view.
+        for inst in self.instances() {
+            if let Some(t) = pick(inst) {
+                return Some(t);
+            }
+        }
+        None
     }
 
     /// Strict-mode typing guard: a bare lowercase letter was pressed outside
@@ -1870,32 +2074,18 @@ impl HomeView {
             return;
         }
 
-        if let Some(id) = self.selected_session.clone() {
-            if let Some(inst) = self.get_instance(&id) {
-                if inst.status == Status::Creating {
-                    return;
-                }
-                let title = inst.title.clone();
-                let inst_id = inst.id.clone();
-                let tmux_session = crate::tmux::Session::new(&inst_id, &title).ok();
-                let is_running = tmux_session.as_ref().is_some_and(|s| s.exists());
-                if is_running {
-                    self.pending_send_session = Some(id);
-                    let mut dialog = SendMessageDialog::new(&title);
-                    dialog.handle_paste(&s);
-                    self.send_message_dialog = Some(dialog);
-                    return;
-                }
-            }
+        if let Some((id, title)) = self.resolve_paste_target() {
+            self.pending_send_session = Some(id);
+            let mut dialog = SendMessageDialog::new(&title);
+            dialog.handle_paste(&s);
+            self.send_message_dialog = Some(dialog);
+            return;
         }
 
-        self.info_dialog = Some(InfoDialog::new(
-            "No session selected",
-            &format!(
-                "Pressed '{c}' but no running session is selected to send to. \
-                 Use arrow keys or j/k to select a session, then type your message."
-            ),
-        ));
+        match self.pending_paste.as_mut() {
+            Some(buf) => buf.push_str(&s),
+            None => self.pending_paste = Some(s),
+        }
     }
 
     /// Re-score matches after a reload without moving the cursor.
@@ -2099,33 +2289,15 @@ impl HomeView {
             }
             // Ctrl+O stays as-is (cycle sort backward, already handled by its own arm)
             KeyCode::Char('o') if ctrl => Some(key),
-            // Shifted action letters used to be lowercased here so a single
-            // `Char('letter')` arm could handle both modes. That was a bug:
-            // every target lowercase handler is guarded `if !self.strict_hotkeys`,
-            // so the normalize sent the chord into a dead arm and strict mode
-            // could never reach the action. Each letter has its own
-            // `Char('UPPER') if self.strict_hotkeys` arm that does the right
-            // thing — passing Shift+letter through unchanged lets those arms
-            // fire directly. Affects N (new session), X (stop), S (settings),
-            // M (message), T (toggle view), C (container toggle), Q (quit).
-            // Q was already excluded; the remaining six are now no longer
-            // normalized either.
+            // Shifted action letters pass through unchanged. Each letter has its
+            // own `Char('UPPER') if self.strict_hotkeys` arm in the main match.
+            // Lowercasing here would route the chord into a dead arm guarded
+            // `if !self.strict_hotkeys`, so the action would silently no-op.
+            // Affects D (delete), R (rename), N, X, S, M, T, C, Q, O.
             //
-            // Side benefit: this also makes the chords work on iOS Mosh, where
-            // Shift+letter is delivered as the bare uppercase keycode without
-            // a Shift modifier.
-            //
-            // `O` is INTENTIONALLY excluded from any normalize: lowercasing
-            // Shift+O to 'o' would collide with bare 'o' (which must fall
-            // through to the compose dialog in strict mode — "no destructive
-            // lowercase" rule). Let 'O' reach the main match as-is so its own
-            // `Char('O')` arm can fire for sort-cycle without ambiguity.
-            // D -> d (delete) and R -> r (rename) in strict mode
-            // (the original uppercase D=diff and R=serve are now behind Ctrl)
-            KeyCode::Char(c @ ('D' | 'R')) if bare || shift_only => Some(KeyEvent::new(
-                KeyCode::Char(c.to_ascii_lowercase()),
-                KeyModifiers::NONE,
-            )),
+            // Side benefit: passing through unchanged also makes the chords work
+            // on iOS Mosh, where Shift+letter is delivered as the bare uppercase
+            // keycode without a Shift modifier.
             // Bare lowercase letters pass through — the main match falls through
             // to a catch-all that opens the compose dialog pre-filled with the
             // letter (strict-mode typing-guard). Navigation keys j/k/h/l are

@@ -79,6 +79,30 @@ fn spinner_starting(created_at: &DateTime<Utc>) -> &'static str {
         .current_frame()
 }
 
+/// Pick the agent-view row icon for a session instance. Centralizes the
+/// archive/snooze override that kills the live spinner for sunk rows so the
+/// list reads as parked instead of "still alive." Exposed at crate visibility
+/// so tests can pin the override behavior without going through the full
+/// render pipeline.
+pub(crate) fn agent_row_icon(inst: &crate::session::Instance) -> &'static str {
+    let icon = match inst.status {
+        Status::Running => spinner_running(&inst.created_at),
+        Status::Waiting => spinner_waiting(&inst.created_at),
+        Status::Idle => ICON_IDLE,
+        Status::Unknown => ICON_UNKNOWN,
+        Status::Stopped => ICON_STOPPED,
+        Status::Error => ICON_ERROR,
+        Status::Starting => spinner_starting(&inst.created_at),
+        Status::Deleting => ICON_DELETING,
+        Status::Creating => spinner_starting(&inst.created_at),
+    };
+    if inst.is_archived() || inst.is_snoozed() {
+        ICON_STOPPED
+    } else {
+        icon
+    }
+}
+
 /// Format a timestamp as a compact relative age (e.g. `3m`, `2h`, `4d`, `2mo`).
 /// Returns an empty string for `None` so callers can unconditionally substitute
 /// the result without guarding for absence.
@@ -111,10 +135,10 @@ fn format_relative_age(ts: Option<DateTime<Utc>>) -> String {
 }
 
 /// Format a remaining snooze duration as a compact countdown string that
-/// fits in the `LAST_ACTIVITY_SLOT` (e.g. `23m`, `1h`, `59m`). Falls back
+/// fits in the `LAST_ACTIVITY_SLOT` (e.g. `23m`, `1h`, `5d`). Falls back
 /// to `<1m` for sub-minute remainders so the user sees "about to wake"
-/// rather than an empty slot. Days not expected (snooze is capped at 24h
-/// by `validate_snooze_duration`) but formatted defensively.
+/// rather than an empty slot. Picker tops out at 1 week; validator cap
+/// is 30 days, so the day branch handles up to ~30d.
 fn format_snooze_remaining(delta: chrono::Duration) -> String {
     let secs = delta.num_seconds();
     if secs < 60 {
@@ -158,6 +182,7 @@ impl HomeView {
         area: Rect,
         theme: &Theme,
         update_info: Option<&UpdateInfo>,
+        update_status: Option<&str>,
     ) {
         // Settings view takes over the whole screen
         if let Some(ref mut settings) = self.settings_view {
@@ -244,7 +269,7 @@ impl HomeView {
         self.render_status_bar(frame, main_chunks[1], theme);
 
         if let Some(info) = update_info {
-            self.render_update_bar(frame, main_chunks[2], theme, info);
+            self.render_update_bar(frame, main_chunks[2], theme, info, update_status);
         }
 
         // Render dialogs on top
@@ -282,6 +307,7 @@ impl HomeView {
             snooze_duration_dialog,
             profile_picker_dialog,
             send_message_dialog,
+            update_confirm_dialog,
         );
     }
 
@@ -364,7 +390,7 @@ impl HomeView {
                 Line::from("No sessions yet").style(Style::default().fg(theme.dimmed)),
                 Line::from(""),
                 Line::from("Press 'n' to create one").style(Style::default().fg(theme.hint)),
-                Line::from("or 'agent-of-empires add .'").style(Style::default().fg(theme.hint)),
+                Line::from("or 'aoe add .'").style(Style::default().fg(theme.hint)),
             ];
             let para = Paragraph::new(empty_text).alignment(Alignment::Center);
             frame.render_widget(para, inner);
@@ -511,24 +537,13 @@ impl HomeView {
                 if let Some(inst) = self.get_instance(id) {
                     match self.view_mode {
                         ViewMode::Agent => {
-                            let mut icon = match inst.status {
-                                Status::Running => spinner_running(&inst.created_at),
-                                Status::Waiting => spinner_waiting(&inst.created_at),
-                                Status::Idle => ICON_IDLE,
-                                Status::Unknown => ICON_UNKNOWN,
-                                Status::Stopped => ICON_STOPPED,
-                                Status::Error => ICON_ERROR,
-                                Status::Starting => spinner_starting(&inst.created_at),
-                                Status::Deleting => ICON_DELETING,
-                                Status::Creating => spinner_starting(&inst.created_at),
-                            };
                             // Archive/snooze kills the live spinner. A shelved
                             // session's underlying status (Running/Waiting/...)
                             // is noise; an animated row reads as "still alive"
                             // and pulls the eye away from real attention items.
-                            if inst.is_archived() || inst.is_snoozed() {
-                                icon = ICON_STOPPED;
-                            }
+                            // Logic centralized in `agent_row_icon` so tests
+                            // can pin it without driving the full render path.
+                            let mut icon = agent_row_icon(inst);
                             let color = match inst.status {
                                 Status::Running => theme.running,
                                 Status::Waiting => theme.waiting,
@@ -541,32 +556,43 @@ impl HomeView {
                                 Status::Creating => theme.accent,
                             };
                             let mut style = Style::default().fg(color);
-                            if inst.is_archived() {
-                                // Archive must visually demote the row even
-                                // when status would otherwise color it red
-                                // (Error) or amber (Waiting). DIM alone only
-                                // lowers intensity — it doesn't kill the hue,
-                                // so an archived Error row still screams red.
-                                // Override foreground to theme.dimmed so the
-                                // row reads as muted gray; the status icon
-                                // (✕ / ⠒ / etc.) keeps its semantic glyph.
+                            if inst.is_archived() || inst.is_snoozed() {
+                                // Archived AND snoozed rows render with one
+                                // uniform muted glyph regardless of underlying
+                                // status. Without this override an archived
+                                // session whose sidecar still says `running`
+                                // would keep animating its spinner (just
+                                // dimmed) — visually identical to an active
+                                // session and a recurring source of "why is
+                                // this archived row spinning" confusion. The
+                                // semantic state still lives in the persisted
+                                // `inst.status`; we just stop painting it
+                                // here because archive/snooze are by
+                                // definition "not actively asking for
+                                // attention." Same glyph as ICON_STOPPED so
+                                // the row reads as quiet/parked. Error (✕)
+                                // also gets folded in — an archived error is
+                                // still archived; the red ✕ goes away.
+                                icon = ICON_STOPPED;
                                 style = Style::default()
                                     .fg(theme.dimmed)
                                     .add_modifier(ratatui::style::Modifier::ITALIC)
                                     .add_modifier(ratatui::style::Modifier::DIM);
-                            } else if inst.is_snoozed() {
-                                // Snoozed = "temporary archive": same
-                                // foreground demotion + italic+dim style as
-                                // archive so the row visually sinks
-                                // regardless of status, plus a `z ` ASCII
-                                // prefix (single-column glyph — mirrors the
-                                // favorite "* " fix that avoided iOS emoji
-                                // wide-width rendering bugs). The age column
-                                // separately shows remaining sleep time.
+                            } else if inst.is_urgent() {
+                                // Agent flagged this row urgent via the
+                                // `attention-urgent` script. Override fg with
+                                // the error color (red) and add BOLD +
+                                // RAPID_BLINK so the row screams across the
+                                // pane. Urgent wins over favorite styling
+                                // since urgent is a cross-tier promoter and
+                                // the visual must match: a row that sorts to
+                                // top must look the part. Archive/snooze
+                                // still wins over urgent because is_urgent()
+                                // returns false for sunk rows.
                                 style = Style::default()
-                                    .fg(theme.dimmed)
-                                    .add_modifier(ratatui::style::Modifier::ITALIC)
-                                    .add_modifier(ratatui::style::Modifier::DIM);
+                                    .fg(theme.error)
+                                    .add_modifier(ratatui::style::Modifier::BOLD)
+                                    .add_modifier(ratatui::style::Modifier::RAPID_BLINK);
                             } else if inst.is_favorited() {
                                 // Favorited, non-archived: bold + underlined
                                 // + "* " prefix. ASCII-only glyph (previously
@@ -579,13 +605,16 @@ impl HomeView {
                                     .add_modifier(ratatui::style::Modifier::BOLD)
                                     .add_modifier(ratatui::style::Modifier::UNDERLINED);
                             }
-                            // Prefix priority: archive (no prefix) wins
-                            // over snooze (`z `) wins over favorite (`* `).
-                            // Matches the sort-tier priority: archive > snooze > favorite.
+                            // Prefix priority: archive (no prefix) wins over
+                            // snooze (`z `) wins over urgent (`! `) wins over
+                            // favorite (`* `). Matches the sort-tier priority:
+                            // archive > snooze > urgent > favorite.
                             let title_text = if inst.is_archived() {
                                 Cow::Owned(inst.title.clone())
                             } else if inst.is_snoozed() {
                                 Cow::Owned(format!("z {}", inst.title))
+                            } else if inst.is_urgent() {
+                                Cow::Owned(format!("! {}", inst.title))
                             } else if inst.is_favorited() {
                                 Cow::Owned(format!("* {}", inst.title))
                             } else {
@@ -610,30 +639,33 @@ impl HomeView {
                                     .map(|s| s.exists())
                                     .unwrap_or(false),
                             };
-                            let (icon, color) = if terminal_running {
+                            let (mut icon, color) = if terminal_running {
                                 (spinner_running(&inst.created_at), theme.terminal_active)
                             } else {
                                 (ICON_IDLE, theme.dimmed)
                             };
                             let mut style = Style::default().fg(color);
-                            if inst.is_archived() {
-                                // Same demote-foreground rule as the Agent
-                                // view path above — kill the active-terminal
-                                // hue when archived so the row visually
-                                // sinks regardless of session state.
+                            if inst.is_archived() || inst.is_snoozed() {
+                                // Mirrors the Agent-view path: archived AND
+                                // snoozed rows render with one uniform muted
+                                // glyph regardless of underlying state. Kills
+                                // the running-spinner-on-archived-row visual
+                                // bug where a stale terminal session would
+                                // animate even after the user parked the row.
+                                icon = ICON_STOPPED;
                                 style = Style::default()
                                     .fg(theme.dimmed)
                                     .add_modifier(ratatui::style::Modifier::ITALIC)
                                     .add_modifier(ratatui::style::Modifier::DIM);
-                            } else if inst.is_snoozed() {
-                                // Same visual treatment as the Agent view
-                                // path above — fg=dimmed + italic+dim + `z `
-                                // prefix. Style is applied here; prefix
-                                // lives in `title_text` below.
+                            } else if inst.is_urgent() {
+                                // Mirrors the Agent-view path: agent flagged
+                                // urgent gets red + BOLD + RAPID_BLINK across
+                                // both view modes so the visual is consistent
+                                // when the user toggles agent/terminal view.
                                 style = Style::default()
-                                    .fg(theme.dimmed)
-                                    .add_modifier(ratatui::style::Modifier::ITALIC)
-                                    .add_modifier(ratatui::style::Modifier::DIM);
+                                    .fg(theme.error)
+                                    .add_modifier(ratatui::style::Modifier::BOLD)
+                                    .add_modifier(ratatui::style::Modifier::RAPID_BLINK);
                             } else if inst.is_favorited() {
                                 // Favorited, non-archived: bold + underlined
                                 // + "* " prefix. ASCII-only glyph (previously
@@ -650,6 +682,8 @@ impl HomeView {
                                 Cow::Owned(inst.title.clone())
                             } else if inst.is_snoozed() {
                                 Cow::Owned(format!("z {}", inst.title))
+                            } else if inst.is_urgent() {
+                                Cow::Owned(format!("! {}", inst.title))
                             } else if inst.is_favorited() {
                                 Cow::Owned(format!("* {}", inst.title))
                             } else {
@@ -1195,7 +1229,7 @@ impl HomeView {
         }
         if self.selected_session.is_some() {
             groups.push((1, mk(if strict { "F" } else { "f" }, "Fav")));
-            groups.push((1, mk(if strict { "W" } else { "w" }, "Snooze")));
+            groups.push((1, mk(if strict { "H" } else { "h" }, "Snooze")));
         }
 
         groups.push((4, mk("/", "Search")));
@@ -1248,12 +1282,23 @@ impl HomeView {
         frame.render_widget(status, area);
     }
 
-    fn render_update_bar(&self, frame: &mut Frame, area: Rect, theme: &Theme, info: &UpdateInfo) {
+    fn render_update_bar(
+        &self,
+        frame: &mut Frame,
+        area: Rect,
+        theme: &Theme,
+        info: &UpdateInfo,
+        status: Option<&str>,
+    ) {
         let update_style = Style::default().fg(theme.waiting).bold();
-        let text = format!(
-            " update available {} -> {}",
-            info.current_version, info.latest_version
-        );
+        let text = if let Some(s) = status {
+            format!(" {s}  [Ctrl+x] dismiss")
+        } else {
+            format!(
+                " update available {} → {}  [u] update  [Ctrl+x] dismiss",
+                info.current_version, info.latest_version
+            )
+        };
         let bar = Paragraph::new(Line::from(Span::styled(text, update_style)))
             .style(Style::default().bg(theme.selection));
         frame.render_widget(bar, area);

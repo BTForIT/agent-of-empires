@@ -7,6 +7,12 @@ import { BackToLiveButton } from "./BackToLiveButton";
 import { KeyboardFab } from "./KeyboardFab";
 import { ensureTerminal } from "../lib/api";
 import type { RichDiffFile, SessionResponse } from "../lib/types";
+import {
+  FOCUS_TERMINAL_EVENT,
+  consumePendingTerminalFocus,
+  setPendingTerminalFocus,
+  type FocusTerminalDetail,
+} from "../lib/terminalFocus";
 import "@wterm/dom/css";
 
 const VSPLIT_STORAGE_KEY = "aoe-right-vsplit";
@@ -109,6 +115,38 @@ function PairedTerminal({
     };
   }, [keyboardHeight, keyboardOpen, termRef]);
 
+  // Pin scrollTop on wterm scrollTop=0 mid-session resets (same fix
+  // as TerminalView). See that file for the rationale; this mirror
+  // covers the side terminal pane in the diff viewer.
+  const isInScrollbackRef = useRef(state.isInScrollback);
+  useEffect(() => {
+    isInScrollbackRef.current = state.isInScrollback;
+  }, [state.isInScrollback]);
+  useEffect(() => {
+    let raf = 0;
+    const onScroll = (e: Event) => {
+      const el = termRef.current?.element;
+      if (!el) return;
+      const target = e.target as Node | null;
+      if (target !== el && !(target && el.contains(target))) return;
+      cancelAnimationFrame(raf);
+      raf = requestAnimationFrame(() => {
+        if (isInScrollbackRef.current) return;
+        const elNow = termRef.current?.element;
+        if (!elNow) return;
+        const max = Math.max(0, elNow.scrollHeight - elNow.clientHeight);
+        if (elNow.scrollTop < max - 1) {
+          elNow.scrollTop = elNow.scrollHeight;
+        }
+      });
+    };
+    document.addEventListener("scroll", onScroll, { passive: true, capture: true });
+    return () => {
+      document.removeEventListener("scroll", onScroll, true);
+      cancelAnimationFrame(raf);
+    };
+  }, [termRef]);
+
   const toggleKeyboard = useCallback(() => {
     const term = termRef.current;
     if (!term) return;
@@ -120,6 +158,38 @@ function PairedTerminal({
     }
     activate();
   }, [termRef, keyboardOpen, activate]);
+
+  // Returns true if focus was applied. Callers can fall back to the pending
+  // latch when the textarea isn't in the DOM yet (PTY still booting).
+  const focusSelf = useCallback(() => {
+    const ta = termRef.current?.element.querySelector("textarea");
+    if (ta instanceof HTMLElement) {
+      ta.focus();
+      return true;
+    }
+    return false;
+  }, [termRef]);
+
+  // Cmd+` shortcut focuses this terminal when "paired" is the dispatched
+  // target. The component might be mounted but its PTY not yet ready (the
+  // initial ensureTerminal round-trip), in which case focusSelf() can't
+  // find a textarea, so we latch the intent for the ready-effect below.
+  // While the right panel is collapsed this component is unmounted entirely;
+  // App.tsx sets the latch directly in that case.
+  useEffect(() => {
+    const onFocusEvent = (e: Event) => {
+      const detail = (e as CustomEvent<FocusTerminalDetail>).detail;
+      if (detail?.target !== "paired") return;
+      if (!focusSelf()) setPendingTerminalFocus("paired");
+    };
+    window.addEventListener(FOCUS_TERMINAL_EVENT, onFocusEvent);
+    return () => window.removeEventListener(FOCUS_TERMINAL_EVENT, onFocusEvent);
+  }, [focusSelf]);
+
+  useEffect(() => {
+    if (!ready) return;
+    if (consumePendingTerminalFocus("paired")) focusSelf();
+  }, [ready, focusSelf]);
 
   if (!ready) {
     return (
@@ -154,6 +224,7 @@ function PairedTerminal({
         </div>
       )}
       <div
+        data-term="paired"
         className={`flex-1 overflow-hidden bg-surface-950 relative md:rounded-lg term-panel${termFocused ? " term-focused" : ""}`}
         onFocus={() => setTermFocused(true)}
         onBlur={() => setTermFocused(false)}

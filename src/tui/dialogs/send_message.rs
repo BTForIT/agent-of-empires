@@ -25,7 +25,12 @@ impl SendMessageDialog {
     }
 
     fn get_text(&self) -> String {
-        self.text_area.lines().join("\n")
+        // ratatui_textarea preserves embedded CRs from voice/dictation paste
+        // (iOS speech often emits lone \r as a sentence break). Sending raw \r
+        // through to claude-code causes the agent to submit prematurely or
+        // receive garbled input — normalize before submit.
+        let joined = self.text_area.lines().join("\n");
+        joined.replace("\r\n", "\n").replace('\r', "\n")
     }
 
     pub fn handle_key(&mut self, key: KeyEvent) -> DialogResult<String> {
@@ -61,11 +66,42 @@ impl SendMessageDialog {
         self.text_area.insert_str(text);
     }
 
-    pub fn render(&self, frame: &mut Frame, area: Rect, theme: &Theme) {
-        // 2 for borders + 1 per content line, min 3 (single line), max 12
+    /// Mirror of the height calculation inside `render` so the regression
+    /// test for tiny viewports (iPhone portrait + soft keyboard) can assert
+    /// the dialog never exceeds `area.height`. Keep in lockstep with line ~75.
+    #[cfg(test)]
+    fn dialog_area_height(&self, area: Rect) -> u16 {
         let content_lines = self.text_area.lines().len() as u16;
-        let height = (content_lines + 2).clamp(3, 12);
-        let dialog_width = (area.width * 80 / 100).max(60).min(area.width);
+        (content_lines + 2).clamp(3, 12).min(area.height)
+    }
+
+    /// Test-only accessor for the composed text (newline-joined lines).
+    /// Mirrors `get_text` minus the CR normalization so paste-routing
+    /// tests can assert that embedded newlines from voice/dictation
+    /// survive the trip into the dialog.
+    #[cfg(test)]
+    pub(crate) fn composed_text(&self) -> String {
+        self.text_area.lines().join("\n")
+    }
+
+    pub fn render(&self, frame: &mut Frame, area: Rect, theme: &Theme) {
+        // 2 for borders + 1 per content line, min 3 (single line), max 12,
+        // capped to viewport so the popover never paints under the iOS soft
+        // keyboard if Event::Resize lands mid-render.
+        let content_lines = self.text_area.lines().len() as u16;
+        // Don't force a 3-row floor; viewport may be smaller than 3 rows (iPhone portrait + soft keyboard).
+        let height = (content_lines + 2).clamp(3, 12).min(area.height);
+        // 80% of viewport, capped at 80 cols to avoid sprawl, floored at 26
+        // so the bottom hints (" Enter send Esc cancel ") stay legible.
+        // Below 26 cols (iPhone-portrait Mosh w/ keyboard) take the full
+        // viewport — content truncates but the dialog stays visible.
+        let dialog_width = if area.width <= 26 {
+            area.width
+        } else {
+            ((area.width as u32 * 80 / 100) as u16)
+                .clamp(26, 80)
+                .min(area.width)
+        };
         let dialog_area = super::centered_rect(area, dialog_width, height);
 
         frame.render_widget(Clear, dialog_area);
@@ -205,5 +241,48 @@ mod tests {
         dialog.handle_key(key(KeyCode::Char(' ')));
         dialog.handle_paste("world");
         assert_eq!(dialog.get_text(), "hi world");
+    }
+
+    #[test]
+    fn dialog_height_respects_tiny_viewport() {
+        // Regression: pre-0ddbcad, .min(area.height.max(3)) forced a 3-row
+        // floor even when viewport had < 3 rows (iPhone portrait + soft keyboard).
+        // The dialog overflowed off-screen.
+        use ratatui::layout::Rect;
+
+        let dialog = SendMessageDialog::new("test session");
+
+        // viewport is 2 rows (representative iPhone portrait + soft keyboard)
+        let tiny_area = Rect {
+            x: 0,
+            y: 0,
+            width: 80,
+            height: 2,
+        };
+        let computed_height = dialog.dialog_area_height(tiny_area);
+
+        assert!(
+            computed_height <= tiny_area.height,
+            "dialog height ({}) must not exceed viewport ({})",
+            computed_height,
+            tiny_area.height
+        );
+
+        // Sanity: also holds at height=1 and height=0.
+        for h in [0u16, 1, 2, 3] {
+            let area = Rect {
+                x: 0,
+                y: 0,
+                width: 80,
+                height: h,
+            };
+            let computed = dialog.dialog_area_height(area);
+            assert!(
+                computed <= h,
+                "dialog height ({}) must not exceed viewport ({})",
+                computed,
+                h
+            );
+        }
     }
 }
