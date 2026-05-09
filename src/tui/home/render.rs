@@ -79,6 +79,30 @@ fn spinner_starting(created_at: &DateTime<Utc>) -> &'static str {
         .current_frame()
 }
 
+/// Pick the agent-view row icon for a session instance. Centralizes the
+/// archive/snooze override that kills the live spinner for sunk rows so the
+/// list reads as parked instead of "still alive." Exposed at crate visibility
+/// so tests can pin the override behavior without going through the full
+/// render pipeline.
+pub(crate) fn agent_row_icon(inst: &crate::session::Instance) -> &'static str {
+    let icon = match inst.status {
+        Status::Running => spinner_running(&inst.created_at),
+        Status::Waiting => spinner_waiting(&inst.created_at),
+        Status::Idle => ICON_IDLE,
+        Status::Unknown => ICON_UNKNOWN,
+        Status::Stopped => ICON_STOPPED,
+        Status::Error => ICON_ERROR,
+        Status::Starting => spinner_starting(&inst.created_at),
+        Status::Deleting => ICON_DELETING,
+        Status::Creating => spinner_starting(&inst.created_at),
+    };
+    if inst.is_archived() || inst.is_snoozed() {
+        ICON_STOPPED
+    } else {
+        icon
+    }
+}
+
 /// Format a timestamp as a compact relative age (e.g. `3m`, `2h`, `4d`, `2mo`).
 /// Returns an empty string for `None` so callers can unconditionally substitute
 /// the result without guarding for absence.
@@ -513,24 +537,13 @@ impl HomeView {
                 if let Some(inst) = self.get_instance(id) {
                     match self.view_mode {
                         ViewMode::Agent => {
-                            let mut icon = match inst.status {
-                                Status::Running => spinner_running(&inst.created_at),
-                                Status::Waiting => spinner_waiting(&inst.created_at),
-                                Status::Idle => ICON_IDLE,
-                                Status::Unknown => ICON_UNKNOWN,
-                                Status::Stopped => ICON_STOPPED,
-                                Status::Error => ICON_ERROR,
-                                Status::Starting => spinner_starting(&inst.created_at),
-                                Status::Deleting => ICON_DELETING,
-                                Status::Creating => spinner_starting(&inst.created_at),
-                            };
                             // Archive/snooze kills the live spinner. A shelved
                             // session's underlying status (Running/Waiting/...)
                             // is noise; an animated row reads as "still alive"
                             // and pulls the eye away from real attention items.
-                            if inst.is_archived() || inst.is_snoozed() {
-                                icon = ICON_STOPPED;
-                            }
+                            // Logic centralized in `agent_row_icon` so tests
+                            // can pin it without driving the full render path.
+                            let mut icon = agent_row_icon(inst);
                             let color = match inst.status {
                                 Status::Running => theme.running,
                                 Status::Waiting => theme.waiting,

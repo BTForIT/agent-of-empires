@@ -2820,3 +2820,66 @@ fn wants_text_selection_tracks_copy_friendly_surfaces() {
         assert!(!env.view.wants_text_selection());
     }
 }
+
+#[test]
+#[serial]
+fn archived_running_session_renders_stopped_icon_not_spinner() {
+    // Regression for af711cb: pre-fix, archived/snoozed rows still cycled
+    // through animated spinner frames driven by their underlying Running
+    // status, making sunk rows read as "still alive" and pulling the eye
+    // away from real attention items. Pin the icon to ICON_STOPPED for
+    // archived rows even when status is Running.
+    use super::render::agent_row_icon;
+    use super::ICON_STOPPED;
+    use crate::session::Status;
+
+    let mut env = create_test_env_with_sessions(1);
+    let id = match env.view.flat_items.first() {
+        Some(Item::Session { id, .. }) => id.clone(),
+        _ => panic!("expected one session"),
+    };
+
+    // Archive the session AND keep its underlying status as Running so the
+    // spinner branch would fire in the absence of the override.
+    env.view.mutate_instance(&id, |inst| {
+        inst.status = Status::Running;
+        inst.archived_at = Some(chrono::Utc::now());
+    });
+
+    let inst = env.view.get_instance(&id).expect("session present");
+    let icon = agent_row_icon(inst);
+
+    assert_eq!(
+        icon, ICON_STOPPED,
+        "archived row must render stopped icon, not animated spinner"
+    );
+
+    // Same expectation for snooze: a row snoozed into the future must not
+    // animate even if it's also Running underneath.
+    env.view.mutate_instance(&id, |inst| {
+        inst.status = Status::Running;
+        inst.archived_at = None;
+        inst.snoozed_until = Some(chrono::Utc::now() + chrono::Duration::minutes(15));
+    });
+    let inst = env.view.get_instance(&id).expect("session present");
+    assert_eq!(
+        agent_row_icon(inst),
+        ICON_STOPPED,
+        "snoozed row must render stopped icon, not animated spinner"
+    );
+
+    // Sanity: a plain Running row (no archive, no snooze) must NOT collapse
+    // to ICON_STOPPED — otherwise the test would pass trivially because the
+    // helper always returned the stopped glyph.
+    env.view.mutate_instance(&id, |inst| {
+        inst.status = Status::Running;
+        inst.archived_at = None;
+        inst.snoozed_until = None;
+    });
+    let inst = env.view.get_instance(&id).expect("session present");
+    assert_ne!(
+        agent_row_icon(inst),
+        ICON_STOPPED,
+        "non-archived Running row should keep its spinner; helper would be a no-op otherwise"
+    );
+}
