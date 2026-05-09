@@ -541,6 +541,15 @@ async fn restart_session(profile: &str, args: SessionIdArgs) -> Result<()> {
 
     let tmux_session = crate::tmux::Session::new(&session_id, &title)?;
     if tmux_session.exists() {
+        // remain-on-exit panes survive their child process and tmux reports
+        // them as existing-but-dead. The naive send-keys path would target a
+        // corpse and silently no-op. Respawn-pane brings the pane back via
+        // zsh; the wake message that follows lands in a live shell.
+        if tmux_session.is_pane_dead() {
+            let cwd = recover_cwd_for_session(&tmux_session, &title);
+            tmux_session.respawn_dead_pane(&cwd, Some("zsh"))?;
+            tmux_session.wait_for_shell_prompt(std::time::Duration::from_secs(5))?;
+        }
         let delay = crate::agents::send_keys_enter_delay(&tool);
         let wake_msg = "wake up — pick up what you were doing";
         match tmux_session.send_keys_with_delay(wake_msg, delay) {
@@ -560,6 +569,61 @@ async fn restart_session(profile: &str, args: SessionIdArgs) -> Result<()> {
 
     println!("✓ Restarted session: {}", title);
     Ok(())
+}
+
+/// Recover a usable cwd for a session whose pane was respawned. Mirrors
+/// cx-revive's three-step lookup so the on-revive UX matches whether the
+/// pane was respawned by `cxr` from the shell or `aoe session restart`
+/// from inside aoe.
+///
+/// Order: pane sidecar at /tmp/cx-panes/<pane_id> (cxr's SessionStart
+/// hook writes `<sid> <cfg> <cwd>` per launch) → ~/GitProjects/<project>
+/// derived from the tmux session name (`aoe_<project>_<8hex>`) → $HOME
+/// with a stderr warning. Always returns something usable rather than
+/// erroring, so the respawn keeps making progress on edge cases.
+fn recover_cwd_for_session(tmux_session: &crate::tmux::Session, title: &str) -> String {
+    use std::path::Path;
+
+    if let Some(pane_id) = tmux_session.pane_id() {
+        let sidecar = format!("/tmp/cx-panes/{}", pane_id);
+        if let Ok(content) = std::fs::read_to_string(&sidecar) {
+            if let Some(last) = content.lines().rev().find(|l| !l.trim().is_empty()) {
+                let parts: Vec<&str> = last.splitn(3, ' ').collect();
+                if parts.len() >= 3 {
+                    let cwd = parts[2].trim();
+                    if !cwd.is_empty() && Path::new(cwd).is_dir() {
+                        return cwd.to_string();
+                    }
+                }
+            }
+        }
+    }
+
+    let home = std::env::var("HOME").unwrap_or_else(|_| "/".to_string());
+
+    // session-name fallback: aoe_<project>_<8hex> → ~/GitProjects/<project>
+    let session_name = tmux_session.name();
+    if let Some(rest) = session_name.strip_prefix("aoe_") {
+        if let Some((project, _id)) = rest.rsplit_once('_') {
+            let project_path = format!("{}/GitProjects/{}", home, project);
+            if Path::new(&project_path).is_dir() {
+                return project_path;
+            }
+        }
+    }
+
+    // title-derived fallback (rare: when session_name doesn't parse, e.g.
+    // legacy or hand-renamed sessions).
+    let title_path = format!("{}/GitProjects/{}", home, title);
+    if Path::new(&title_path).is_dir() {
+        return title_path;
+    }
+
+    eprintln!(
+        "Warning: could not recover cwd for session '{}', falling back to $HOME",
+        title
+    );
+    home
 }
 
 async fn attach_session(profile: &str, args: SessionIdArgs) -> Result<()> {
