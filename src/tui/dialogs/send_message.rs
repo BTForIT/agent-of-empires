@@ -75,6 +75,15 @@ impl SendMessageDialog {
         (content_lines + 2).clamp(3, 12).min(area.height)
     }
 
+    /// Test-only accessor for the composed text (newline-joined lines).
+    /// Mirrors `get_text` minus the CR normalization so paste-routing
+    /// tests can assert that embedded newlines from voice/dictation
+    /// survive the trip into the dialog.
+    #[cfg(test)]
+    pub(crate) fn composed_text(&self) -> String {
+        self.text_area.lines().join("\n")
+    }
+
     pub fn render(&self, frame: &mut Frame, area: Rect, theme: &Theme) {
         // 2 for borders + 1 per content line, min 3 (single line), max 12,
         // capped to viewport so the popover never paints under the iOS soft

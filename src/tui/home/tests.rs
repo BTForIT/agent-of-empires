@@ -2883,3 +2883,115 @@ fn archived_running_session_renders_stopped_icon_not_spinner() {
         "non-archived Running row should keep its spinner; helper would be a no-op otherwise"
     );
 }
+
+#[test]
+#[serial]
+fn paste_routes_to_compose_when_settings_open_with_running_session() {
+    // Regression for d28664a (fix(tui): paste routing skips settings view by default).
+    //
+    // Pre-fix order in `handle_paste`:
+    //     settings_view -> rename_dialog -> send_message_dialog -> new_dialog
+    //                                       -> resolve_paste_target -> pending_paste
+    //
+    // settings_view consumed paste FIRST and its own paste sink (settings/input.rs:825)
+    // sanitizes newlines, destroying multi-line voice/dictation text. Documented intent
+    // (help.rs:109) is "Paste -> Capture -> compose dialog".
+    //
+    // Post-fix order:
+    //     rename_dialog -> send_message_dialog -> new_dialog
+    //                   -> resolve_paste_target -> settings_view (fallback) -> pending_paste
+    //
+    // This test creates a real tmux session so `resolve_paste_target` returns Some,
+    // opens the settings_view, pastes multi-line text, and asserts the paste routes to
+    // a freshly-opened SendMessageDialog with newlines intact. Pre-d28664a this fails
+    // because settings consumed the paste first and stripped \n.
+    use crate::tui::settings::SettingsView;
+    use std::process::Command;
+
+    // Skip if tmux not available — TUI tests run on hosts without tmux installed.
+    let tmux_ok = Command::new("tmux")
+        .arg("-V")
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false);
+    if !tmux_ok {
+        eprintln!("Skipping paste_routes_to_compose_when_settings_open_with_running_session: tmux unavailable");
+        return;
+    }
+
+    let mut env = create_test_env_with_sessions(1);
+    let id = match env.view.flat_items.first() {
+        Some(Item::Session { id, .. }) => id.clone(),
+        _ => panic!("expected one session"),
+    };
+    let title = env
+        .view
+        .get_instance(&id)
+        .expect("instance must be present")
+        .title
+        .clone();
+
+    // Materialize a real tmux session that matches `tmux::Session::generate_name`
+    // so `resolve_paste_target` -> `Session::exists()` -> `tmux has-session` returns
+    // true. Use a detached session running `sleep` so it stays up for the test.
+    let tmux_session =
+        crate::tmux::Session::new(&id, &title).expect("Session::new must succeed");
+    tmux_session
+        .create_with_size("/tmp", Some("sleep 30"), Some((80, 24)))
+        .expect("must create tmux session for paste-routing test");
+    // Bust the 2-second SESSION_CACHE so `session_exists_from_cache` either returns
+    // a fresh hit or `None` (forcing the live `tmux has-session` lookup).
+    crate::tmux::refresh_session_cache();
+
+    // Pin selection so `resolve_paste_target` short-circuits on the selected_session
+    // branch (no need to walk all instances).
+    env.view.selected_session = Some(id.clone());
+
+    // Open the settings view. Its own `handle_paste` strips newlines — pre-d28664a
+    // this would consume the paste first and the multi-line dictation would arrive
+    // in settings as one mashed line.
+    let settings = SettingsView::new("test", None).expect("SettingsView::new must succeed");
+    env.view.settings_view = Some(settings);
+
+    // Pre-conditions: no compose dialog yet, settings is the only thing open.
+    assert!(env.view.send_message_dialog.is_none());
+    assert!(env.view.settings_view.is_some());
+
+    let pasted = "first line\nsecond line\nthird";
+    env.view.handle_paste(pasted);
+
+    // Post-d28664a expectation: compose dialog is now open with multi-line text intact.
+    assert!(
+        env.view.send_message_dialog.is_some(),
+        "paste with running session must route to compose dialog, not settings (regression d28664a)"
+    );
+    let dialog = env.view.send_message_dialog.as_ref().unwrap();
+    let composed = dialog.composed_text();
+    assert!(
+        composed.contains('\n'),
+        "newlines must be preserved through compose dialog routing; got {:?}",
+        composed
+    );
+    assert!(
+        composed.contains("first line") && composed.contains("second line") && composed.contains("third"),
+        "all pasted lines must reach the compose dialog; got {:?}",
+        composed
+    );
+
+    // Settings view must still be present (paste did not pop it) but did NOT consume
+    // the paste itself.
+    assert!(
+        env.view.settings_view.is_some(),
+        "settings_view should remain open after paste (paste opens compose on top, doesn't dismiss settings)"
+    );
+
+    // pending_send_session must be set so the dialog submit knows where to deliver.
+    assert_eq!(
+        env.view.pending_send_session.as_deref(),
+        Some(id.as_str()),
+        "pending_send_session must point at the running selected session"
+    );
+
+    // Cleanup the real tmux session so we don't leak between test runs.
+    let _ = tmux_session.kill();
+}
