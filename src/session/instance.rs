@@ -221,6 +221,16 @@ pub struct Instance {
     pub last_error: Option<String>,
     #[serde(skip)]
     pub session_id_poller: Option<Arc<Mutex<SessionPoller>>>,
+
+    /// Cached `is_pane_dead()` reading from the most recent status_poller
+    /// tick. Lets the Attention comparator treat dead-pane rows as sunk
+    /// (tier 99) without re-querying tmux on every sort. Field name avoids
+    /// `pane_dead` to prevent shadowing `tmux::Session::is_pane_dead()` at
+    /// call sites that take both. Refreshed by status_poller; not persisted
+    /// (clears to false on TUI restart, which is correct — a fresh poll
+    /// will re-set it within one tick if the pane is genuinely dead).
+    #[serde(skip)]
+    pub pane_dead_observed: bool,
 }
 
 /// Append yolo-mode flags or environment variables to a launch command.
@@ -399,6 +409,7 @@ impl Instance {
             last_start_time: None,
             last_error: None,
             session_id_poller: None,
+            pane_dead_observed: false,
         }
     }
 

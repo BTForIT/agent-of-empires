@@ -433,17 +433,24 @@ fn last_activity_group_key(
 /// bottom regardless of their current status. They remain visible (rendered
 /// in italic+dim by the row formatter); only the sort order is suppressed.
 fn attention_tier(inst: &Instance) -> u8 {
-    if inst.is_archived() || inst.is_snoozed() {
-        // Snoozed shares the archive tier — "temporary archive" semantics.
-        // When the snooze expires, `is_snoozed()` flips to false on the
-        // next render tick and the row rejoins its natural status tier
-        // below.
+    use crate::session::Status::*;
+    if inst.is_archived()
+        || inst.is_snoozed()
+        || inst.pane_dead_observed
+        || inst.status == Error
+    {
+        // Tier 99 sinks: archived, snoozed (temporary archive — wakes
+        // automatically when timer expires), pane_dead_observed (the
+        // remain-on-exit corpse — `aoe session restart` can revive it but
+        // it's parked until then), and Error (broken until human
+        // intervention). All four read as "do not bother me with this
+        // row" so they share the bottom tier. Auto-revives when the
+        // condition clears (status flips off Error, pane respawns).
         return 99;
     }
-    use crate::session::Status::*;
     match inst.status {
         Waiting => 0,                        // agent paused, needs human input — TOP priority
-        Error => 1,                          // something broke, needs intervention
+        Error => 1, // unreachable: handled above; kept for match exhaustiveness
         Idle => 2,                           // turn complete, ready for next prompt
         Unknown => 3,                        // status undetermined, glance warranted
         Running => 4,                        // actively working, leave alone
@@ -494,13 +501,17 @@ fn attention_session_key(
     // design — within the sunk block, recency ordering is the intent.
     let favorite_bias = tier != 99 && inst.is_favorited();
     if tier == 99 {
-        // Archived + snoozed share tier 99. Secondary sort uses
-        // archived_at when present, else snoozed_until — each sub-block
-        // orders most-recent first (Reverse). Mixed rows interleave by
-        // their active timestamp, which matches "recency view" intent for
-        // both: a just-archived row and a just-snoozed row both belong
-        // near the top of the sunk section.
-        let ts = inst.archived_at.or(inst.snoozed_until);
+        // Tier 99 unifies archived, snoozed, pane_dead, and Error rows.
+        // Secondary sort timestamp falls through: archived_at first, then
+        // snoozed_until, then last_accessed_at (the only signal Error /
+        // pane_dead rows have — they were never explicitly archived).
+        // Reverse() makes most-recent sink-time bubble to the top of the
+        // sunk block, matching "recency view" intent across all four
+        // sub-categories.
+        let ts = inst
+            .archived_at
+            .or(inst.snoozed_until)
+            .or(inst.last_accessed_at);
         return (
             !urgent_bias,
             tier,

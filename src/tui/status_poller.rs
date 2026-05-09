@@ -45,6 +45,11 @@ pub struct StatusUpdate {
     /// persist it to the real Instance — the poller mutates a clone, so any
     /// fields not plumbed through here are dropped on the floor.
     pub last_accessed_at: Option<chrono::DateTime<chrono::Utc>>,
+    /// Cached pane-dead reading from `tmux::PaneMetadata.pane_dead`. The
+    /// main thread writes this onto `Instance.pane_dead_observed` so the
+    /// Attention sort can treat dead panes as tier 99 without re-querying
+    /// tmux per sort.
+    pub pane_dead: bool,
 }
 
 /// Background thread that polls session status without blocking the UI
@@ -154,6 +159,9 @@ impl StatusPoller {
                                         status: Status::Error,
                                         last_error: Some("Container is not running".to_string()),
                                         last_accessed_at: inst.last_accessed_at,
+                                        // Sandboxed sessions don't have a tmux pane in the
+                                        // usual sense; the Error tier itself sinks the row.
+                                        pane_dead: false,
                                     });
                                 }
                             }
@@ -163,6 +171,7 @@ impl StatusPoller {
                     // Look up pre-fetched metadata for this instance's tmux session
                     let session_name = crate::tmux::Session::generate_name(&inst.id, &inst.title);
                     let metadata = pane_metadata.get(&session_name);
+                    let pane_dead = metadata.map(|m| m.pane_dead).unwrap_or(false);
 
                     inst.update_status_with_metadata(metadata);
 
@@ -171,6 +180,7 @@ impl StatusPoller {
                         status: inst.status,
                         last_error: inst.last_error,
                         last_accessed_at: inst.last_accessed_at,
+                        pane_dead,
                     })
                 })
                 .collect();
