@@ -179,6 +179,77 @@ impl Session {
         Ok(true)
     }
 
+    /// Return the tmux pane id for the first window's first pane (e.g. "%158"),
+    /// or None if the session is gone or tmux refuses. Used by lifecycle
+    /// helpers that need to address the pane directly (e.g. cx-panes sidecar
+    /// lookup) rather than via session-name.
+    pub fn pane_id(&self) -> Option<String> {
+        let target = format!("{}:^.0", self.name);
+        let output = Command::new("tmux")
+            .args(["display-message", "-t", &target, "-p", "#{pane_id}"])
+            .output()
+            .ok()?;
+        if !output.status.success() {
+            return None;
+        }
+        let id = String::from_utf8(output.stdout).ok()?.trim().to_string();
+        if id.is_empty() {
+            None
+        } else {
+            Some(id)
+        }
+    }
+
+    /// Poll capture-pane every 500ms until the last visible line ends with a
+    /// shell prompt char (`$`, `%`, or `>`) or `timeout` elapses. Used after
+    /// respawn-pane to wait for zsh to render its prompt before injecting
+    /// keys (without this, keystrokes race the shell startup and get lost).
+    pub fn wait_for_shell_prompt(&self, timeout: std::time::Duration) -> Result<()> {
+        let start = std::time::Instant::now();
+        let target = format!("{}:^.0", self.name);
+        while start.elapsed() < timeout {
+            let output = Command::new("tmux")
+                .args(["capture-pane", "-t", &target, "-p", "-S", "-3"])
+                .output();
+            if let Ok(out) = output {
+                if out.status.success() {
+                    let content = String::from_utf8_lossy(&out.stdout);
+                    if let Some(last) = content.lines().rev().find(|l| !l.trim().is_empty()) {
+                        let trimmed = last.trim_end();
+                        if matches!(trimmed.chars().last(), Some('$') | Some('%') | Some('>')) {
+                            return Ok(());
+                        }
+                    }
+                }
+            }
+            std::thread::sleep(std::time::Duration::from_millis(500));
+        }
+        bail!(
+            "Timed out waiting for shell prompt on session {} after {:?}",
+            self.name,
+            timeout
+        );
+    }
+
+    /// Kill the agent process inside the pane WITHOUT tearing down the
+    /// tmux session. With `remain-on-exit on` (which AoE always sets), the
+    /// pane survives as a "Pane is dead" corpse, ready to be respawned by
+    /// `respawn_dead_pane()`. Used by archive=kill: stops the agent from
+    /// consuming resources while the row sits sunk in the Attention sort.
+    /// Idempotent: no-op if the session doesn't exist or has no pane pid.
+    pub fn kill_pane(&self) -> Result<()> {
+        if !self.exists() {
+            return Ok(());
+        }
+        if let Some(pane_pid) = self.get_pane_pid() {
+            process::kill_process_tree(pane_pid);
+        }
+        // Don't refresh the session cache here — the tmux session itself
+        // is unchanged; only the pane process is gone. Status_poller will
+        // pick up pane_dead on its next tick.
+        Ok(())
+    }
+
     pub fn kill(&self) -> Result<()> {
         if !self.exists() {
             return Ok(());

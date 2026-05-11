@@ -656,6 +656,7 @@ impl HomeView {
                 // the echoed value is a no-op when unchanged.
                 let new_last_accessed = update.last_accessed_at;
 
+                let new_pane_dead = update.pane_dead;
                 if should_update {
                     let new_status = update.status;
                     let new_error = update.last_error;
@@ -665,6 +666,7 @@ impl HomeView {
                         if new_last_accessed.is_some() {
                             inst.last_accessed_at = new_last_accessed;
                         }
+                        inst.pane_dead_observed = new_pane_dead;
                     });
 
                     if let Some(old) = old_status {
@@ -675,6 +677,15 @@ impl HomeView {
                 } else if new_last_accessed.is_some() {
                     self.mutate_instance(&update.id, |inst| {
                         inst.last_accessed_at = new_last_accessed;
+                        inst.pane_dead_observed = new_pane_dead;
+                    });
+                } else {
+                    // No status change AND no fresh activity stamp. We still
+                    // need to refresh pane_dead_observed: a corpse can sit
+                    // unchanged for hours and the sort tier should reflect
+                    // current reality. Cheap mutate (one bool write).
+                    self.mutate_instance(&update.id, |inst| {
+                        inst.pane_dead_observed = new_pane_dead;
                     });
                 }
             }

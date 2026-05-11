@@ -31,8 +31,8 @@ pub enum SessionCommands {
     /// Stop session process
     Stop(SessionIdArgs),
 
-    /// Restart session
-    Restart(SessionIdArgs),
+    /// Restart session (or all sessions with `--all`)
+    Restart(RestartArgs),
 
     /// Attach to session interactively
     Attach(SessionIdArgs),
@@ -50,8 +50,10 @@ pub enum SessionCommands {
     Current(CurrentArgs),
 
     /// Archive a session (sinks it to the bottom of the Attention sort,
-    /// rendered in italic+dim; remains visible).
-    Archive(SessionIdArgs),
+    /// rendered in italic+dim; remains visible). Default kills the tmux
+    /// pane process so an archived session stops consuming resources;
+    /// pass `--no-kill` to opt out and keep the pane running.
+    Archive(ArchiveArgs),
 
     /// Unarchive a session (clears archived_at).
     Unarchive(SessionIdArgs),
@@ -96,6 +98,25 @@ pub struct SnoozeArgs {
     /// profile's configured `session.snooze_duration_minutes` (default 30).
     #[arg(short = 'm', long)]
     minutes: Option<u64>,
+}
+
+#[derive(Args)]
+pub struct RestartArgs {
+    /// Session ID or title (required unless `--all` is passed)
+    pub identifier: Option<String>,
+
+    /// Restart every session in the active profile. Useful after
+    /// `aoe update`, after editing `sandbox.environment`, after a
+    /// Docker hiccup, or after changing a hook. Mutually exclusive
+    /// with `identifier`.
+    #[arg(long, conflicts_with = "identifier")]
+    pub all: bool,
+
+    /// Concurrency cap for `--all`. Restarting many sandboxed
+    /// sessions in parallel pressures dockerd, so the default is
+    /// intentionally modest. Ignored when `--all` is not set.
+    #[arg(long, default_value_t = 3)]
+    pub parallel: usize,
 }
 
 #[derive(Args)]
@@ -169,6 +190,19 @@ pub struct SetSessionIdArgs {
     session_id: String,
 }
 
+#[derive(Args)]
+pub struct ArchiveArgs {
+    /// Session ID or title
+    pub identifier: String,
+    /// Sink-only: skip killing the tmux pane on archive. Default behavior
+    /// is to terminate the agent process (the pane stays as a remain-on-exit
+    /// corpse) so an archived session stops consuming resources. Pass
+    /// `--no-kill` for the rare case where you want the pane to keep
+    /// running while sunk in the Attention sort.
+    #[arg(long)]
+    pub no_kill: bool,
+}
+
 #[derive(Serialize)]
 struct SessionDetails {
     id: String,
@@ -187,14 +221,14 @@ pub async fn run(profile: &str, command: SessionCommands) -> Result<()> {
     match command {
         SessionCommands::Start(args) => start_session(profile, args).await,
         SessionCommands::Stop(args) => stop_session(profile, args).await,
-        SessionCommands::Restart(args) => restart_session(profile, args).await,
+        SessionCommands::Restart(args) => restart_session_dispatch(profile, args).await,
         SessionCommands::Attach(args) => attach_session(profile, args).await,
         SessionCommands::Show(args) => show_session(profile, args).await,
         SessionCommands::Capture(args) => capture_session(profile, args).await,
         SessionCommands::Rename(args) => rename_session(profile, args).await,
         SessionCommands::Current(args) => current_session(args).await,
-        SessionCommands::Archive(args) => set_session_archived(profile, args, true).await,
-        SessionCommands::Unarchive(args) => set_session_archived(profile, args, false).await,
+        SessionCommands::Archive(args) => archive_session(profile, args).await,
+        SessionCommands::Unarchive(args) => unarchive_session(profile, args).await,
         SessionCommands::Favorite(args) => set_session_favorited(profile, args, true).await,
         SessionCommands::Unfavorite(args) => set_session_favorited(profile, args, false).await,
         SessionCommands::Snooze(args) => snooze_session(profile, args).await,
@@ -292,7 +326,7 @@ async fn set_session_favorited(profile: &str, args: SessionIdArgs, favorited: bo
     Ok(())
 }
 
-async fn set_session_archived(profile: &str, args: SessionIdArgs, archived: bool) -> Result<()> {
+async fn archive_session(profile: &str, args: ArchiveArgs) -> Result<()> {
     let storage = Storage::new(profile)?;
     let (mut instances, groups) = storage.load_with_groups()?;
 
@@ -305,18 +339,79 @@ async fn set_session_archived(profile: &str, args: SessionIdArgs, archived: bool
         })
         .ok_or_else(|| anyhow::anyhow!("Session not found: {}", args.identifier))?;
 
-    if archived {
-        instances[idx].archive();
-    } else {
-        instances[idx].unarchive();
-    }
+    let was_archived = instances[idx].is_archived();
+    instances[idx].archive();
     let title = instances[idx].title.clone();
+    let session_id = instances[idx].id.clone();
+
+    // None → Some transition: kill the tmux pane process so the agent
+    // stops consuming resources. With remain-on-exit on, the pane stays
+    // around as a corpse and `aoe session unarchive` (Piece 2 below) or
+    // `aoe session restart` (Piece 1) will respawn it.
+    //
+    // Already-archived → archive is a no-op for the kill: pane was
+    // already killed on the first archive.
+    if !was_archived && !args.no_kill {
+        let tmux_session = crate::tmux::Session::new(&session_id, &title)?;
+        if tmux_session.exists() {
+            if let Err(e) = tmux_session.kill_pane() {
+                eprintln!(
+                    "Warning: failed to kill pane for archived session '{}': {}",
+                    title, e
+                );
+            }
+        }
+    }
 
     let group_tree = GroupTree::new_with_groups(&instances, &groups);
     storage.save_with_groups(&instances, &group_tree)?;
 
-    let verb = if archived { "Archived" } else { "Unarchived" };
-    println!("✓ {} session: {}", verb, title);
+    println!("✓ Archived session: {}", title);
+    Ok(())
+}
+
+async fn unarchive_session(profile: &str, args: SessionIdArgs) -> Result<()> {
+    let storage = Storage::new(profile)?;
+    let (mut instances, groups) = storage.load_with_groups()?;
+
+    let idx = instances
+        .iter()
+        .position(|i| {
+            i.id == args.identifier
+                || i.id.starts_with(&args.identifier)
+                || i.title == args.identifier
+        })
+        .ok_or_else(|| anyhow::anyhow!("Session not found: {}", args.identifier))?;
+
+    let was_archived = instances[idx].is_archived();
+    instances[idx].unarchive();
+    let title = instances[idx].title.clone();
+    let session_id = instances[idx].id.clone();
+    let tool = instances[idx].tool.clone();
+
+    // Some → None transition: respawn the pane and send the resume
+    // message. Mirrors restart_session's pane_dead branch (Piece 1):
+    // the on-archive kill leaves a remain-on-exit corpse, so unarchive
+    // is the inverse — revive it. Cwd recovery uses the same three-step
+    // chain (sidecar → session-name → $HOME).
+    if was_archived {
+        let tmux_session = crate::tmux::Session::new(&session_id, &title)?;
+        if tmux_session.exists() && tmux_session.is_pane_dead() {
+            let cwd = recover_cwd_for_session(&tmux_session, &title);
+            tmux_session.respawn_dead_pane(&cwd, Some("zsh"))?;
+            tmux_session.wait_for_shell_prompt(std::time::Duration::from_secs(5))?;
+            let delay = crate::agents::send_keys_enter_delay(&tool);
+            let resume_msg = "wake up — pick up what you were doing";
+            if let Err(e) = tmux_session.send_keys_with_delay(resume_msg, delay) {
+                eprintln!("Warning: failed to send resume message: {}", e);
+            }
+        }
+    }
+
+    let group_tree = GroupTree::new_with_groups(&instances, &groups);
+    storage.save_with_groups(&instances, &group_tree)?;
+
+    println!("✓ Unarchived session: {}", title);
     Ok(())
 }
 
@@ -384,6 +479,117 @@ async fn stop_session(profile: &str, args: SessionIdArgs) -> Result<()> {
     Ok(())
 }
 
+async fn restart_session_dispatch(profile: &str, args: RestartArgs) -> Result<()> {
+    if args.all {
+        return restart_all_sessions(profile, args.parallel).await;
+    }
+    let identifier = args
+        .identifier
+        .ok_or_else(|| anyhow::anyhow!("session identifier required (or pass --all)"))?;
+    restart_session(profile, SessionIdArgs { identifier }).await
+}
+
+async fn restart_all_sessions(profile: &str, parallel: usize) -> Result<()> {
+    let storage = Storage::new(profile)?;
+    let (mut instances, groups) = storage.load_with_groups()?;
+
+    let target_ids = pick_targets_for_restart_all(&instances);
+    if target_ids.is_empty() {
+        println!("No sessions to restart in profile '{}'.", profile);
+        return Ok(());
+    }
+
+    let total = target_ids.len();
+    let size = crate::terminal::get_size();
+    let parallel = parallel.max(1);
+
+    // Clone each target into its worker; we'll write the (mutated) copy back
+    // by index after the worker returns. Workers never touch the shared Vec.
+    let mut targets: Vec<(usize, crate::session::Instance)> = Vec::with_capacity(total);
+    for id in &target_ids {
+        if let Some(idx) = instances.iter().position(|i| &i.id == id) {
+            targets.push((idx, instances[idx].clone()));
+        }
+    }
+
+    let semaphore = std::sync::Arc::new(tokio::sync::Semaphore::new(parallel));
+    let mut join_set: tokio::task::JoinSet<(
+        usize,
+        String,
+        Option<crate::session::Instance>,
+        Result<()>,
+    )> = tokio::task::JoinSet::new();
+
+    for (idx, mut inst) in targets {
+        let permit_sem = semaphore.clone();
+        join_set.spawn(async move {
+            let _permit = permit_sem
+                .acquire_owned()
+                .await
+                .expect("semaphore not closed");
+            let title = inst.title.clone();
+            let res = tokio::task::spawn_blocking(move || {
+                let result = inst.restart_with_size(size);
+                (inst, result)
+            })
+            .await;
+            match res {
+                Ok((inst, result)) => (idx, title, Some(inst), result),
+                Err(join_err) => (
+                    idx,
+                    title,
+                    None,
+                    Err(anyhow::anyhow!("worker panicked: {}", join_err)),
+                ),
+            }
+        });
+    }
+
+    let mut succeeded: Vec<String> = Vec::new();
+    let mut failed: Vec<(String, String)> = Vec::new();
+
+    while let Some(joined) = join_set.join_next().await {
+        let (idx, title, inst_opt, result) =
+            joined.expect("JoinSet shouldn't panic on join itself");
+        if let Some(inst) = inst_opt {
+            instances[idx] = inst;
+        }
+        match result {
+            Ok(()) => succeeded.push(title),
+            Err(e) => failed.push((title, e.to_string())),
+        }
+    }
+
+    let group_tree = GroupTree::new_with_groups(&instances, &groups);
+    storage.save_with_groups(&instances, &group_tree)?;
+
+    println!("✓ Restarted {}/{} sessions:", succeeded.len(), total);
+    for title in &succeeded {
+        println!("  · {}", title);
+    }
+    if !failed.is_empty() {
+        println!("✗ {} failed:", failed.len());
+        for (title, err) in &failed {
+            println!("  · {}: {}", title, err);
+        }
+        bail!("{} session(s) failed to restart", failed.len());
+    }
+
+    Ok(())
+}
+
+/// Sessions in `Deleting` or `Creating` are mid-transition; restarting them
+/// would race the deletion/boot path. Everything else is fair game; agents
+/// have their own resume-or-restart logic on the next start.
+fn pick_targets_for_restart_all(instances: &[crate::session::Instance]) -> Vec<String> {
+    use crate::session::Status;
+    instances
+        .iter()
+        .filter(|i| !matches!(i.status, Status::Deleting | Status::Creating))
+        .map(|i| i.id.clone())
+        .collect()
+}
+
 async fn restart_session(profile: &str, args: SessionIdArgs) -> Result<()> {
     let storage = Storage::new(profile)?;
     let (mut instances, groups) = storage.load_with_groups()?;
@@ -411,6 +617,15 @@ async fn restart_session(profile: &str, args: SessionIdArgs) -> Result<()> {
 
     let tmux_session = crate::tmux::Session::new(&session_id, &title)?;
     if tmux_session.exists() {
+        // remain-on-exit panes survive their child process and tmux reports
+        // them as existing-but-dead. The naive send-keys path would target a
+        // corpse and silently no-op. Respawn-pane brings the pane back via
+        // zsh; the wake message that follows lands in a live shell.
+        if tmux_session.is_pane_dead() {
+            let cwd = recover_cwd_for_session(&tmux_session, &title);
+            tmux_session.respawn_dead_pane(&cwd, Some("zsh"))?;
+            tmux_session.wait_for_shell_prompt(std::time::Duration::from_secs(5))?;
+        }
         let delay = crate::agents::send_keys_enter_delay(&tool);
         let wake_msg = "wake up — pick up what you were doing";
         match tmux_session.send_keys_with_delay(wake_msg, delay) {
@@ -430,6 +645,61 @@ async fn restart_session(profile: &str, args: SessionIdArgs) -> Result<()> {
 
     println!("✓ Restarted session: {}", title);
     Ok(())
+}
+
+/// Recover a usable cwd for a session whose pane was respawned. Mirrors
+/// cx-revive's three-step lookup so the on-revive UX matches whether the
+/// pane was respawned by `cxr` from the shell or `aoe session restart`
+/// from inside aoe.
+///
+/// Order: pane sidecar at /tmp/cx-panes/<pane_id> (cxr's SessionStart
+/// hook writes `<sid> <cfg> <cwd>` per launch) → ~/GitProjects/<project>
+/// derived from the tmux session name (`aoe_<project>_<8hex>`) → $HOME
+/// with a stderr warning. Always returns something usable rather than
+/// erroring, so the respawn keeps making progress on edge cases.
+fn recover_cwd_for_session(tmux_session: &crate::tmux::Session, title: &str) -> String {
+    use std::path::Path;
+
+    if let Some(pane_id) = tmux_session.pane_id() {
+        let sidecar = format!("/tmp/cx-panes/{}", pane_id);
+        if let Ok(content) = std::fs::read_to_string(&sidecar) {
+            if let Some(last) = content.lines().rev().find(|l| !l.trim().is_empty()) {
+                let parts: Vec<&str> = last.splitn(3, ' ').collect();
+                if parts.len() >= 3 {
+                    let cwd = parts[2].trim();
+                    if !cwd.is_empty() && Path::new(cwd).is_dir() {
+                        return cwd.to_string();
+                    }
+                }
+            }
+        }
+    }
+
+    let home = std::env::var("HOME").unwrap_or_else(|_| "/".to_string());
+
+    // session-name fallback: aoe_<project>_<8hex> → ~/GitProjects/<project>
+    let session_name = tmux_session.name();
+    if let Some(rest) = session_name.strip_prefix("aoe_") {
+        if let Some((project, _id)) = rest.rsplit_once('_') {
+            let project_path = format!("{}/GitProjects/{}", home, project);
+            if Path::new(&project_path).is_dir() {
+                return project_path;
+            }
+        }
+    }
+
+    // title-derived fallback (rare: when session_name doesn't parse, e.g.
+    // legacy or hand-renamed sessions).
+    let title_path = format!("{}/GitProjects/{}", home, title);
+    if Path::new(&title_path).is_dir() {
+        return title_path;
+    }
+
+    eprintln!(
+        "Warning: could not recover cwd for session '{}', falling back to $HOME",
+        title
+    );
+    home
 }
 
 async fn attach_session(profile: &str, args: SessionIdArgs) -> Result<()> {
@@ -775,5 +1045,112 @@ mod tests {
         inst.archive();
         inst.unarchive();
         assert!(ensure_not_archived(&inst, "forit-Avatics").is_ok());
+    }
+}
+
+#[cfg(test)]
+mod restart_args_tests {
+    use super::SessionCommands;
+    use clap::Parser;
+
+    #[derive(Parser)]
+    struct Cli {
+        #[command(subcommand)]
+        cmd: SessionCommands,
+    }
+
+    #[test]
+    fn restart_with_identifier_still_parses() {
+        let cli = Cli::try_parse_from(["aoe", "restart", "claude-3"])
+            .expect("identifier-only must parse");
+        match cli.cmd {
+            SessionCommands::Restart(args) => {
+                assert!(!args.all);
+                assert_eq!(args.identifier.as_deref(), Some("claude-3"));
+                assert_eq!(args.parallel, 3);
+            }
+            _ => panic!("wrong subcommand"),
+        }
+    }
+
+    #[test]
+    fn restart_all_alone_parses() {
+        let cli = Cli::try_parse_from(["aoe", "restart", "--all"]).expect("--all alone must parse");
+        match cli.cmd {
+            SessionCommands::Restart(args) => {
+                assert!(args.all);
+                assert!(args.identifier.is_none());
+                assert_eq!(args.parallel, 3);
+            }
+            _ => panic!("wrong subcommand"),
+        }
+    }
+
+    #[test]
+    fn restart_all_with_parallel_parses() {
+        let cli = Cli::try_parse_from(["aoe", "restart", "--all", "--parallel", "5"])
+            .expect("--all --parallel must parse");
+        match cli.cmd {
+            SessionCommands::Restart(args) => {
+                assert!(args.all);
+                assert_eq!(args.parallel, 5);
+            }
+            _ => panic!("wrong subcommand"),
+        }
+    }
+
+    #[test]
+    fn restart_identifier_and_all_conflicts() {
+        let result = Cli::try_parse_from(["aoe", "restart", "claude-3", "--all"]);
+        assert!(
+            result.is_err(),
+            "passing both identifier and --all should error"
+        );
+    }
+}
+
+#[cfg(test)]
+mod target_filter_tests {
+    use super::pick_targets_for_restart_all;
+    use crate::session::{Instance, Status};
+
+    fn instance_with_status(id: &str, status: Status) -> Instance {
+        let mut inst = Instance::new(id, "/tmp");
+        inst.id = id.to_string();
+        inst.status = status;
+        inst
+    }
+
+    #[test]
+    fn skips_deleting_and_creating() {
+        let instances = vec![
+            instance_with_status("running", Status::Running),
+            instance_with_status("idle", Status::Idle),
+            instance_with_status("stopped", Status::Stopped),
+            instance_with_status("error", Status::Error),
+            instance_with_status("waiting", Status::Waiting),
+            instance_with_status("starting", Status::Starting),
+            instance_with_status("unknown", Status::Unknown),
+            instance_with_status("deleting", Status::Deleting),
+            instance_with_status("creating", Status::Creating),
+        ];
+        let mut picked = pick_targets_for_restart_all(&instances);
+        picked.sort();
+        let mut expected = vec![
+            "error".to_string(),
+            "idle".to_string(),
+            "running".to_string(),
+            "starting".to_string(),
+            "stopped".to_string(),
+            "unknown".to_string(),
+            "waiting".to_string(),
+        ];
+        expected.sort();
+        assert_eq!(picked, expected);
+    }
+
+    #[test]
+    fn empty_input_yields_empty_targets() {
+        assert!(pick_targets_for_restart_all(&[]).is_empty());
     }
 }
