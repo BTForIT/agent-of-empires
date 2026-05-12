@@ -30,7 +30,8 @@ pub use groups::{
     flatten_sessions_by_attention, flatten_tree, flatten_tree_all_profiles, Group, GroupTree, Item,
 };
 pub use instance::{
-    Instance, SandboxInfo, Status, TerminalInfo, WorkspaceInfo, WorkspaceRepo, WorktreeInfo,
+    EnsureReadyOutcome, Instance, SandboxInfo, Status, TerminalInfo, WorkspaceInfo, WorkspaceRepo,
+    WorktreeInfo,
 };
 pub use profile_config::{
     load_profile_config, merge_configs, resolve_config, resolve_config_or_warn,

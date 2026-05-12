@@ -49,6 +49,18 @@ pub enum Status {
     Creating,
 }
 
+/// Outcome of `Instance::ensure_pane_ready` — used by callers to surface
+/// what (if anything) happened on the user's behalf before a send.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EnsureReadyOutcome {
+    /// Pane was already alive; no action taken.
+    AlreadyAlive,
+    /// Pane was dead (`#{pane_dead}=1`) and was respawned via the restart path.
+    Respawned,
+    /// Tmux session did not exist and was started from scratch.
+    Started,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WorktreeInfo {
     pub branch: String,
@@ -1581,6 +1593,39 @@ impl Instance {
         }
 
         self.start_with_size_opts(size, skip_on_launch)
+    }
+
+    /// Smart-send precondition: bring this session's tmux pane to a state
+    /// where `send_keys_with_delay` is safe.
+    ///
+    /// Handles three states the caller would otherwise hit silently:
+    /// - Tmux session missing entirely → start from scratch via `start_with_size`.
+    /// - Pane dead (`#{pane_dead}=1`) → reuse the restart path which
+    ///   respawn-unblocks then kill+start_with_size_opts with the agent
+    ///   command (same path E/F5 uses; well-tested).
+    /// - Already alive → no-op.
+    ///
+    /// Bails on Creating/Deleting (transient lifecycle states).
+    ///
+    /// Design: docs/plans/2026-05-12-aoe-smart-send-design.md (in the
+    /// consumer fork).
+    pub fn ensure_pane_ready(&mut self) -> Result<EnsureReadyOutcome> {
+        if matches!(self.status, Status::Creating | Status::Deleting) {
+            anyhow::bail!(
+                "Session is mid-lifecycle ({:?}); cannot send right now",
+                self.status
+            );
+        }
+        let session = self.tmux_session()?;
+        if !session.exists() {
+            self.start_with_size(None)?;
+            return Ok(EnsureReadyOutcome::Started);
+        }
+        if session.is_pane_dead() {
+            self.restart_with_size(None)?;
+            return Ok(EnsureReadyOutcome::Respawned);
+        }
+        Ok(EnsureReadyOutcome::AlreadyAlive)
     }
 
     pub fn kill(&self) -> Result<()> {

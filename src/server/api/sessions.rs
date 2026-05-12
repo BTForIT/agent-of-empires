@@ -2032,7 +2032,13 @@ pub async fn send_message(
     let tool = instance.tool.clone();
     let message = req.message;
     let send_result = tokio::task::spawn_blocking(move || -> Result<(), SendKeysError> {
-        let tmux_session = instance.tmux_session().map_err(SendKeysError::Tmux)?;
+        // Smart-send: respawn dead pane / start stopped session first.
+        // See docs/plans/2026-05-12-aoe-smart-send-design.md.
+        let mut inst_owned = instance;
+        inst_owned
+            .ensure_pane_ready()
+            .map_err(|e| SendKeysError::Tmux(e))?;
+        let tmux_session = inst_owned.tmux_session().map_err(SendKeysError::Tmux)?;
         if !tmux_session.exists() {
             return Err(SendKeysError::NotRunning);
         }

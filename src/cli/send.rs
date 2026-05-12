@@ -3,7 +3,7 @@
 use anyhow::{bail, Result};
 use clap::Args;
 
-use crate::session::Storage;
+use crate::session::{EnsureReadyOutcome, Storage};
 
 #[derive(Args)]
 pub struct SendArgs {
@@ -12,6 +12,13 @@ pub struct SendArgs {
 
     /// Message to send to the agent
     message: String,
+
+    /// Fail-loud on dead/stopped sessions instead of auto-respawning.
+    /// Default behavior auto-revives so the user's "archive = listed +
+    /// revive via send" mental model holds; pass this for scripts that
+    /// want today's bail-out semantics.
+    #[arg(long = "no-revive")]
+    no_revive: bool,
 }
 
 pub async fn run(profile: &str, args: SendArgs) -> Result<()> {
@@ -26,8 +33,27 @@ pub async fn run(profile: &str, args: SendArgs) -> Result<()> {
     let session_id = inst.id.clone();
     let session_title = inst.title.clone();
     let tool = inst.tool.clone();
-    let tmux_session = crate::tmux::Session::new(&inst.id, &inst.title)?;
 
+    // Smart-send: revive the pane if needed before delivering keystrokes.
+    // Without this, send to a dead-archived row silently writes to a
+    // corpse and the user sees the row pop back to Running with no
+    // agent response. See docs/plans/2026-05-12-aoe-smart-send-design.md.
+    if !args.no_revive {
+        if let Some(target) = instances.iter_mut().find(|i| i.id == session_id) {
+            match target.ensure_pane_ready() {
+                Ok(EnsureReadyOutcome::Respawned) => {
+                    eprintln!("  (respawned dead pane before send)");
+                }
+                Ok(EnsureReadyOutcome::Started) => {
+                    eprintln!("  (started stopped session before send)");
+                }
+                Ok(EnsureReadyOutcome::AlreadyAlive) => {}
+                Err(e) => bail!("{}", e),
+            }
+        }
+    }
+
+    let tmux_session = crate::tmux::Session::new(&session_id, &session_title)?;
     if !tmux_session.exists() {
         bail!(
             "Session is not running. Start it first with: aoe session start {}",

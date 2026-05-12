@@ -534,6 +534,24 @@ impl HomeView {
                 DialogResult::Submit(message) => {
                     self.send_message_dialog = None;
                     if let Some(session_id) = self.pending_send_session.take() {
+                        // Smart-send: respawn the pane / start the session if
+                        // needed before delivering keystrokes. Without this,
+                        // send to a dead-archived row writes to a corpse and
+                        // the row pops back to Running with no agent. See
+                        // docs/plans/2026-05-12-aoe-smart-send-design.md.
+                        let mut ensure_err: Option<String> = None;
+                        self.mutate_instance(&session_id, |inst| {
+                            if let Err(e) = inst.ensure_pane_ready() {
+                                ensure_err = Some(e.to_string());
+                            }
+                        });
+                        if let Some(err) = ensure_err {
+                            self.info_dialog = Some(InfoDialog::new(
+                                "Send Failed",
+                                &format!("Cannot prepare session: {}", err),
+                            ));
+                            return None;
+                        }
                         if let Some(inst) = self.get_instance(&session_id) {
                             match crate::tmux::Session::new(&inst.id, &inst.title) {
                                 Ok(tmux_session) => {
