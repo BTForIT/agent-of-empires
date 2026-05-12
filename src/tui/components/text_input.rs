@@ -167,7 +167,10 @@ pub fn render_text_field_with_ghost(
 
     if value.is_empty() && !is_focused {
         if let Some(placeholder_text) = placeholder {
-            spans.push(Span::styled(placeholder_text, value_style));
+            // Render placeholder dimmed + italic so it's visually distinct
+            // from a real value the user has typed or autofilled.
+            let placeholder_style = Style::default().fg(theme.dimmed).italic();
+            spans.push(Span::styled(placeholder_text, placeholder_style));
         }
     } else if is_focused {
         let cursor_pos = input.visual_cursor();
