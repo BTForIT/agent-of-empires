@@ -371,11 +371,19 @@ impl NewSessionDialog {
             .position(|p| p == profile)
             .unwrap_or(0);
 
+        // Seed title from the cwd's folder basename so opening the dialog
+        // already shows the most likely default.
+        let initial_title = std::path::Path::new(&current_dir)
+            .file_name()
+            .and_then(|n| n.to_str())
+            .map(|s| Input::new(s.to_string()))
+            .unwrap_or_default();
+
         Self {
             profile: profile.to_string(),
             available_profiles,
             profile_index,
-            title: Input::default(),
+            title: initial_title,
             path: Input::new(current_dir),
             group: Input::default(),
             tool_index,
@@ -433,7 +441,24 @@ impl NewSessionDialog {
 
     /// Pre-fill the path field (e.g. from a selected session).
     pub fn set_path(&mut self, path: String) {
-        self.path = Input::new(path);
+        self.path = Input::new(path.clone());
+        self.maybe_autofill_title_from_path(&path);
+    }
+
+    /// Populate the title from the path's folder basename when the user
+    /// hasn't typed one yet. Called from every code path that writes the
+    /// path field (constructor, set_path, browse-picker result, ghost
+    /// accept, paste) so the title default tracks the path consistently.
+    fn maybe_autofill_title_from_path(&mut self, path: &str) {
+        if !self.title.value().is_empty() {
+            return;
+        }
+        if let Some(basename) = std::path::Path::new(path)
+            .file_name()
+            .and_then(|n| n.to_str())
+        {
+            self.title = Input::new(basename.to_string());
+        }
     }
 
     /// Pre-fill the group field (e.g. from a selected session or group).
@@ -825,19 +850,7 @@ impl NewSessionDialog {
                             .and_then(path_input::compute_path_ghost);
                         self.workspace_repo_dir_picker_active = false;
                     } else {
-                        // Auto-fill title from folder basename when the user
-                        // hasn't typed one yet. The folder name is almost
-                        // always what they'd call the session anyway, and
-                        // making it the default removes a second step after
-                        // the browse picker selects a directory.
-                        if self.title.value().is_empty() {
-                            if let Some(basename) = std::path::Path::new(&path)
-                                .file_name()
-                                .and_then(|n| n.to_str())
-                            {
-                                self.title = Input::new(basename.to_string());
-                            }
-                        }
+                        self.maybe_autofill_title_from_path(&path);
                         self.path = Input::new(path);
                         self.recompute_path_ghost();
                     }
@@ -1524,6 +1537,16 @@ impl NewSessionDialog {
     pub fn handle_paste(&mut self, text: &str) {
         let sanitized: String = text.chars().filter(|c| *c != '\n' && *c != '\r').collect();
 
+        // Detect whether this paste is landing in the path field so we can
+        // (a) feed it the chars normally and (b) trigger the title autofill
+        // afterward, matching the behavior of constructor/set_path/picker/ghost.
+        let pasting_into_path = self.env_editing_input.is_none()
+            && self.workspace_repo_editing_input.is_none()
+            && !self.tool_config_mode
+            && !self.worktree_config_mode
+            && !self.sandbox_config_mode
+            && self.focused_field == self.path_field();
+
         // Route to the active sub-mode input if one is open
         let target: &mut Input = if let Some(ref mut input) = self.env_editing_input {
             input
@@ -1544,6 +1567,12 @@ impl NewSessionDialog {
         };
         for ch in sanitized.chars() {
             target.handle(tui_input::InputRequest::InsertChar(ch));
+        }
+
+        if pasting_into_path {
+            let path_value = self.path.value().to_string();
+            self.maybe_autofill_title_from_path(&path_value);
+            self.recompute_path_ghost();
         }
     }
 

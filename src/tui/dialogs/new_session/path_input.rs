@@ -265,7 +265,8 @@ impl NewSessionDialog {
         let mut new_value = value;
         new_value.push_str(&ghost.ghost_text);
         let new_cursor = new_value.chars().count();
-        self.set_path_value_with_cursor(new_value, new_cursor);
+        self.set_path_value_with_cursor(new_value.clone(), new_cursor);
+        self.maybe_autofill_title_from_path(&new_value);
         self.error_message = None;
         self.path_invalid_flash_until = None;
         self.recompute_path_ghost();
