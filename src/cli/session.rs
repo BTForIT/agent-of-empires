@@ -40,6 +40,15 @@ pub enum SessionCommands {
 
     /// Wake a snoozed session immediately
     Unsnooze(SessionIdArgs),
+
+    /// Archive a session (sinks it to the bottom of the Attention sort).
+    /// Kills the tmux pane unless `--no-kill` is passed. The worktree,
+    /// branch, and container are preserved; use `aoe remove --hard` to
+    /// fully destroy a session.
+    Archive(ArchiveArgs),
+
+    /// Unarchive a session (restores it to its tier in the Attention sort)
+    Unarchive(SessionIdArgs),
 }
 
 #[derive(Args)]
@@ -51,6 +60,18 @@ pub struct SnoozeArgs {
     /// from the active config (default 30)
     #[arg(long)]
     pub minutes: Option<u32>,
+}
+
+#[derive(Args)]
+pub struct ArchiveArgs {
+    /// Session ID or title
+    pub identifier: String,
+
+    /// Skip killing the tmux pane. By default archiving stops the running
+    /// agent so the row renders as truly parked; pass this to keep the
+    /// pane alive while still marking the session archived.
+    #[arg(long = "no-kill")]
+    pub no_kill: bool,
 }
 
 #[derive(Args)]
@@ -176,7 +197,64 @@ pub async fn run(profile: &str, command: SessionCommands) -> Result<()> {
         SessionCommands::SetSessionId(args) => set_session_id(profile, args).await,
         SessionCommands::Snooze(args) => snooze_session(profile, args).await,
         SessionCommands::Unsnooze(args) => unsnooze_session(profile, args).await,
+        SessionCommands::Archive(args) => archive_session(profile, args).await,
+        SessionCommands::Unarchive(args) => unarchive_session(profile, args).await,
     }
+}
+
+async fn archive_session(profile: &str, args: ArchiveArgs) -> Result<()> {
+    let storage = Storage::new(profile)?;
+    let (mut instances, groups) = storage.load_with_groups()?;
+
+    let idx = instances
+        .iter()
+        .position(|i| {
+            i.id == args.identifier
+                || i.id.starts_with(&args.identifier)
+                || i.title == args.identifier
+        })
+        .ok_or_else(|| anyhow::anyhow!("Session not found: {}", args.identifier))?;
+
+    if !args.no_kill {
+        // Stop the agent before flipping the archived bit so the row renders
+        // as truly parked; otherwise the spinner would keep animating until
+        // the tmux pane exits on its own.
+        if let Err(e) = instances[idx].kill() {
+            eprintln!("Warning: failed to kill tmux session: {}", e);
+        }
+    }
+
+    instances[idx].archive();
+    let title = instances[idx].title.clone();
+
+    let group_tree = GroupTree::new_with_groups(&instances, &groups);
+    storage.save_with_groups(&instances, &group_tree)?;
+
+    println!("Archived: {}", title);
+    Ok(())
+}
+
+async fn unarchive_session(profile: &str, args: SessionIdArgs) -> Result<()> {
+    let storage = Storage::new(profile)?;
+    let (mut instances, groups) = storage.load_with_groups()?;
+
+    let idx = instances
+        .iter()
+        .position(|i| {
+            i.id == args.identifier
+                || i.id.starts_with(&args.identifier)
+                || i.title == args.identifier
+        })
+        .ok_or_else(|| anyhow::anyhow!("Session not found: {}", args.identifier))?;
+
+    instances[idx].unarchive();
+    let title = instances[idx].title.clone();
+
+    let group_tree = GroupTree::new_with_groups(&instances, &groups);
+    storage.save_with_groups(&instances, &group_tree)?;
+
+    println!("Unarchived: {}", title);
+    Ok(())
 }
 
 async fn snooze_session(profile: &str, args: SnoozeArgs) -> Result<()> {

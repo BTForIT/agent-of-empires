@@ -3053,4 +3053,3 @@ fn apply_status_update_skips_terminal_states() {
     assert_eq!(inst.status, Status::Deleting);
     assert_eq!(inst.idle_entered_at, None);
 }
-

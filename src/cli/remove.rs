@@ -9,6 +9,14 @@ use crate::git::GitWorktree;
 use crate::session::{GroupTree, Instance, Storage};
 use std::path::PathBuf;
 
+/// Returns true when the invocation explicitly asks for destructive cleanup.
+/// Plain `aoe remove <id>` (no flags) falls through to the archive path so
+/// users don't lose worktrees, branches, or containers by reflex; passing
+/// any of these flags or `--hard` opts back into the original behavior.
+fn is_destructive(args: &RemoveArgs) -> bool {
+    args.hard || args.delete_worktree || args.delete_branch
+}
+
 #[derive(Args)]
 pub struct RemoveArgs {
     /// Session ID or title to remove
@@ -29,6 +37,15 @@ pub struct RemoveArgs {
     /// Keep container instead of deleting it (default: delete per config)
     #[arg(long = "keep-container")]
     keep_container: bool,
+
+    /// Fully destroy the session (worktree + branch + container) instead
+    /// of the default behavior, which now archives the session and kills
+    /// its tmux pane while preserving the worktree, branch, and container.
+    /// Implies `--delete-worktree` and `--delete-branch`. Use this when
+    /// scripts that previously called plain `aoe remove` want the old
+    /// destructive semantics.
+    #[arg(long)]
+    hard: bool,
 }
 
 fn needs_worktree_cleanup(inst: &Instance, args: &RemoveArgs) -> bool {
@@ -37,7 +54,23 @@ fn needs_worktree_cleanup(inst: &Instance, args: &RemoveArgs) -> bool {
         .is_some_and(|wt| wt.managed_by_aoe && args.delete_worktree)
 }
 
-pub async fn run(profile: &str, args: RemoveArgs) -> Result<()> {
+pub async fn run(profile: &str, mut args: RemoveArgs) -> Result<()> {
+    // Delete-as-archive: plain `aoe remove <id>` (no destructive flags)
+    // archives the session and kills its tmux pane, preserving the worktree,
+    // branch, and container. Scripted destructive removes that already pass
+    // any of `--delete-worktree`, `--delete-branch`, or `--hard` keep working.
+    if !is_destructive(&args) {
+        return archive_as_remove(profile, &args).await;
+    }
+
+    // `--hard` is shorthand for the full destructive set so users don't have
+    // to remember which subset of cleanup flags reproduces the pre-redirect
+    // behavior.
+    if args.hard {
+        args.delete_worktree = true;
+        args.delete_branch = true;
+    }
+
     let storage = Storage::new(profile)?;
     let (instances, groups) = storage.load_with_groups()?;
 
@@ -252,5 +285,45 @@ pub async fn run(profile: &str, args: RemoveArgs) -> Result<()> {
         storage.profile()
     );
 
+    Ok(())
+}
+
+/// Archive-mode `aoe remove`: kill the tmux pane, set `archived_at`, persist.
+/// No worktree, branch, or container destruction. Mirrors the CLI's
+/// `aoe session archive` so the user can keep using `remove` muscle memory
+/// without the surprise of losing managed worktrees.
+async fn archive_as_remove(profile: &str, args: &RemoveArgs) -> Result<()> {
+    let storage = Storage::new(profile)?;
+    let (mut instances, groups) = storage.load_with_groups()?;
+
+    let idx = instances
+        .iter()
+        .position(|i| {
+            i.id == args.identifier
+                || i.id.starts_with(&args.identifier)
+                || i.title == args.identifier
+        })
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "Session not found in profile '{}': {}",
+                storage.profile(),
+                args.identifier
+            )
+        })?;
+
+    if let Err(e) = instances[idx].kill() {
+        eprintln!("Warning: failed to kill tmux session: {}", e);
+    }
+
+    instances[idx].archive();
+    let title = instances[idx].title.clone();
+
+    let group_tree = GroupTree::new_with_groups(&instances, &groups);
+    storage.save_with_groups(&instances, &group_tree)?;
+
+    println!(
+        "Archived: {} (worktree, branch, and container preserved; pass --hard to fully remove)",
+        title
+    );
     Ok(())
 }
