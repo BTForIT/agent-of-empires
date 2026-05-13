@@ -283,6 +283,67 @@ export function fetchAbout(): Promise<ServerAbout | null> {
   return fetchJson<ServerAbout>("/api/about");
 }
 
+export interface UpdateStatus {
+  check_enabled: boolean;
+  current_version: string;
+  latest_version: string | null;
+  update_available: boolean;
+  release_url: string | null;
+  web_poll_interval_minutes: number;
+  error: string | null;
+}
+
+export function fetchUpdateStatus(): Promise<UpdateStatus | null> {
+  return fetchJson<UpdateStatus>("/api/system/update-status");
+}
+
+// --- Branches ---
+
+export interface BranchInfo {
+  name: string;
+  is_current: boolean;
+  remote_only?: boolean;
+}
+
+/** Lists branches for a repo path. When `includeRemote` is true the
+ *  response includes branches that only exist on the remote (with
+ *  `remote_only: true`); selecting one bases the new worktree off the
+ *  remote tip. See #948. */
+export function fetchBranches(
+  path: string,
+  includeRemote = false,
+): Promise<BranchInfo[] | null> {
+  const params = new URLSearchParams({ path });
+  if (includeRemote) params.set("include_remote", "true");
+  return fetchJson<BranchInfo[]>(`/api/git/branches?${params.toString()}`);
+}
+
+// --- Cockpit context primer ---
+
+export interface ContextPrimerResponse {
+  primer: string;
+  included_event_count: number;
+  included_turn_count: number;
+  truncated: boolean;
+  max_chars: number;
+}
+
+/** Fetch a markdown primer built from events `seq < beforeSeq`. Used
+ *  after a `session/load` failure: the agent's model context is empty
+ *  but the transcript is intact in SQLite, so the user can opt in to
+ *  pre-filling the composer with a compact recap. See #1004. */
+export function fetchContextPrimer(
+  sessionId: string,
+  beforeSeq: number,
+  signal?: AbortSignal,
+): Promise<ContextPrimerResponse | null> {
+  const params = new URLSearchParams({ before_seq: String(beforeSeq) });
+  return fetchJson<ContextPrimerResponse>(
+    `/api/sessions/${encodeURIComponent(sessionId)}/cockpit/context-primer?${params.toString()}`,
+    signal ? { signal } : undefined,
+  );
+}
+
 // --- Devices ---
 
 export interface DeviceInfo {

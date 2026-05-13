@@ -28,6 +28,7 @@ import {
   type CockpitContext,
 } from "./CockpitRuntime";
 import { Composer } from "./Composer";
+import { ContextPrimerBanner } from "./ContextPrimerBanner";
 import { Markdown } from "./Markdown";
 import { SubagentCard, ToolCard, ToolGroupCard } from "./ToolCards";
 import {
@@ -91,6 +92,12 @@ function CockpitChrome({
   sessionId: string;
   cockpitWorkerState: "absent" | "resuming" | "running";
 }) {
+  // Composer prefill keyed for re-fires; set by the
+  // ContextPrimerBanner on click. Local rather than on CockpitState
+  // because it's a one-shot UI action, not part of the event log.
+  const [primerPrefill, setPrimerPrefill] = useState<
+    { id: string; text: string } | null
+  >(null);
   return (
     <div className="flex h-full flex-col bg-surface-900 text-text-primary">
       <PlanStrip plan={state.plan} mode={state.mode} />
@@ -116,6 +123,16 @@ function CockpitChrome({
         !state.startupError &&
         !state.workerStopped &&
         !state.workerRestarting && <WorkerResumingBanner />}
+      {state.nextWakeupAt &&
+        !state.turnActive &&
+        !state.startupError &&
+        !state.workerStopped &&
+        !state.workerRestarting && (
+          <ScheduledWakeupBanner
+            wakeAt={state.nextWakeupAt}
+            reason={state.nextWakeupReason}
+          />
+        )}
       {state.lastError && (
         <InteractionErrorBanner
           message={state.lastError}
@@ -166,6 +183,17 @@ function CockpitChrome({
           onClear={clearQueue}
         />
 
+        <ContextPrimerBanner
+          sessionId={sessionId}
+          available={state.contextPrimerAvailable}
+          onInsertPrimer={(text) =>
+            setPrimerPrefill({
+              id: `primer-${state.contextPrimerAvailable?.resetSeq ?? 0}-${Date.now()}`,
+              text,
+            })
+          }
+        />
+
         <Composer
           sessionId={sessionId}
           availableModes={state.availableModes}
@@ -177,6 +205,7 @@ function CockpitChrome({
           turnActive={state.turnActive}
           queuedCount={state.queuedPrompts.length}
           enqueuePrompt={sendPrompt}
+          primerPrefill={primerPrefill}
         />
       </ThreadPrimitive.Root>
     </div>
@@ -820,6 +849,62 @@ function WorkerResumingBanner() {
       <span>
         Resuming cockpit worker… cached transcript still available. Queued
         prompts will send once the agent is back online.
+      </span>
+    </div>
+  );
+}
+
+/** Top-of-cockpit chip shown while the agent's `ScheduleWakeup` is
+ *  pending. Visible only when no turn is in flight (turns produce their
+ *  own busy chrome) and no other recovery banner is up. 1Hz local tick
+ *  for the countdown; once the wake fires the next UserPromptSent
+ *  clears `state.nextWakeupAt` on the reducer side and this unmounts.
+ *  See #1091. */
+function ScheduledWakeupBanner({
+  wakeAt,
+  reason,
+}: {
+  wakeAt: string;
+  reason: string | null;
+}) {
+  const targetMs = Date.parse(wakeAt);
+  const [now, setNow] = useState(() => Date.now());
+  const elapsed = !Number.isFinite(targetMs) || targetMs <= now;
+  useEffect(() => {
+    if (elapsed) return;
+    const id = setInterval(() => setNow(Date.now()), 1000);
+    return () => clearInterval(id);
+  }, [elapsed]);
+  if (!Number.isFinite(targetMs)) return null;
+  const remaining = Math.max(0, Math.floor((targetMs - now) / 1000));
+  const wakeDate = new Date(targetMs);
+  const clock = `${String(wakeDate.getHours()).padStart(2, "0")}:${String(
+    wakeDate.getMinutes(),
+  ).padStart(2, "0")}`;
+  let label: string;
+  if (elapsed) {
+    label = "Waking…";
+  } else if (remaining < 60) {
+    label = `Asleep until ${clock} (in ${remaining}s)`;
+  } else if (remaining < 3600) {
+    const m = Math.floor(remaining / 60);
+    const s = remaining % 60;
+    label = `Asleep until ${clock} (in ${m}m ${String(s).padStart(2, "0")}s)`;
+  } else {
+    const h = Math.floor(remaining / 3600);
+    const m = Math.floor((remaining % 3600) / 60);
+    label = `Asleep until ${clock} (in ${h}h ${m}m)`;
+  }
+  return (
+    <div className="flex items-center gap-2 border-b border-sky-900/60 bg-sky-950/40 px-4 py-2 text-xs text-sky-200">
+      <span aria-hidden className="text-base leading-none">
+        ⏰
+      </span>
+      <span className="truncate">
+        {label}
+        {reason ? (
+          <span className="text-sky-300/70">: {reason}</span>
+        ) : null}
       </span>
     </div>
   );

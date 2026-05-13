@@ -54,6 +54,7 @@ pub enum FieldKey {
     CheckEnabled,
     CheckIntervalHours,
     NotifyInCli,
+    WebPollIntervalMinutes,
     // Worktree
     WorktreeEnabled,
     PathTemplate,
@@ -107,6 +108,7 @@ pub enum FieldKey {
     WebNotifyOnWaiting,
     WebNotifyOnIdle,
     WebNotifyOnError,
+    WebNotifyOnWakeFire,
     // Cockpit (gated on the `serve` feature; the variants are always
     // present in the enum so external callers don't have to cfg-gate
     // their match arms)
@@ -487,6 +489,15 @@ fn build_web_fields(
             has_override: false,
             inherited_display: None,
         },
+        SettingField {
+            key: FieldKey::WebNotifyOnWakeFire,
+            label: "Notify on scheduled wake",
+            description: "Default: send a push when a cockpit session's ScheduleWakeup timer fires (the next /loop turn starts). Suppressed if the TUI or web dashboard has been active in the last 30s.",
+            value: FieldValue::Bool(global.web.notify_on_wake_fire),
+            category: SettingsCategory::Web,
+            has_override: false,
+            inherited_display: None,
+        },
     ]
 }
 
@@ -605,6 +616,11 @@ fn build_updates_fields(
         global.updates.notify_in_cli,
         updates.and_then(|u| u.notify_in_cli),
     );
+    let (web_poll, o4) = resolve_value(
+        scope,
+        global.updates.web_poll_interval_minutes,
+        updates.and_then(|u| u.web_poll_interval_minutes),
+    );
 
     vec![
         SettingField {
@@ -636,6 +652,18 @@ fn build_updates_fields(
             category: SettingsCategory::Updates,
             has_override: o3,
             inherited_display: inherited_if(o3, FieldValue::Bool(global.updates.notify_in_cli)),
+        },
+        SettingField {
+            key: FieldKey::WebPollIntervalMinutes,
+            label: "Web Poll Interval (minutes)",
+            description: "How often the web dashboard re-polls for new releases",
+            value: FieldValue::Number(web_poll),
+            category: SettingsCategory::Updates,
+            has_override: o4,
+            inherited_display: inherited_if(
+                o4,
+                FieldValue::Number(global.updates.web_poll_interval_minutes),
+            ),
         },
     ]
 }
@@ -1657,6 +1685,9 @@ fn apply_field_to_global(field: &SettingField, config: &mut Config) {
             config.updates.check_interval_hours = *v
         }
         (FieldKey::NotifyInCli, FieldValue::Bool(v)) => config.updates.notify_in_cli = *v,
+        (FieldKey::WebPollIntervalMinutes, FieldValue::Number(v)) => {
+            config.updates.web_poll_interval_minutes = *v
+        }
         // Worktree
         (FieldKey::WorktreeEnabled, FieldValue::Bool(v)) => config.worktree.enabled = *v,
         (FieldKey::PathTemplate, FieldValue::Text(v)) => config.worktree.path_template = v.clone(),
@@ -1790,6 +1821,9 @@ fn apply_field_to_global(field: &SettingField, config: &mut Config) {
         (FieldKey::WebNotifyOnIdle, FieldValue::Bool(v)) => {
             config.web.notify_on_idle = *v;
         }
+        (FieldKey::WebNotifyOnWakeFire, FieldValue::Bool(v)) => {
+            config.web.notify_on_wake_fire = *v;
+        }
         (FieldKey::WebNotifyOnError, FieldValue::Bool(v)) => {
             config.web.notify_on_error = *v;
         }
@@ -1871,6 +1905,11 @@ fn apply_field_to_profile(field: &SettingField, _global: &Config, config: &mut P
         }
         (FieldKey::NotifyInCli, FieldValue::Bool(v)) => {
             set_profile_override(*v, &mut config.updates, |s, val| s.notify_in_cli = val);
+        }
+        (FieldKey::WebPollIntervalMinutes, FieldValue::Number(v)) => {
+            set_profile_override(*v, &mut config.updates, |s, val| {
+                s.web_poll_interval_minutes = val
+            });
         }
         // Worktree
         (FieldKey::WorktreeEnabled, FieldValue::Bool(v)) => {

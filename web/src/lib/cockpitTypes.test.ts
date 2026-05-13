@@ -467,6 +467,53 @@ describe("applyEvent / ACP session id lifecycle", () => {
     });
     expect(state.activity.some((r) => r.kind === "context_reset")).toBe(false);
   });
+
+  it("SessionContextReset with prior prompt sets contextPrimerAvailable (#1004)", () => {
+    let state = applyEvent(emptyCockpitState(), {
+      session_id: "s-1",
+      seq: 1,
+      event: { UserPromptSent: { text: "do a thing" } },
+    });
+    expect(state.contextPrimerAvailable).toBeNull();
+    state = applyEvent(state, {
+      session_id: "s-1",
+      seq: 2,
+      event: { SessionContextReset: { reason: "load failed: bad id" } },
+    });
+    expect(state.contextPrimerAvailable).toEqual({
+      resetSeq: 2,
+      reason: "load failed: bad id",
+    });
+  });
+
+  it("SessionContextReset without prior prompt does not set contextPrimerAvailable", () => {
+    const state = applyEvent(emptyCockpitState(), {
+      session_id: "s-1",
+      seq: 1,
+      event: { SessionContextReset: { reason: "load failed" } },
+    });
+    expect(state.contextPrimerAvailable).toBeNull();
+  });
+
+  it("UserPromptSent clears contextPrimerAvailable (one-shot affordance)", () => {
+    let state = applyEvent(emptyCockpitState(), {
+      session_id: "s-1",
+      seq: 1,
+      event: { UserPromptSent: { text: "first" } },
+    });
+    state = applyEvent(state, {
+      session_id: "s-1",
+      seq: 2,
+      event: { SessionContextReset: { reason: "load failed" } },
+    });
+    expect(state.contextPrimerAvailable).not.toBeNull();
+    state = applyEvent(state, {
+      session_id: "s-1",
+      seq: 3,
+      event: { UserPromptSent: { text: "second" } },
+    });
+    expect(state.contextPrimerAvailable).toBeNull();
+  });
 });
 
 describe("applyEvent / Stopped empty-output fallback", () => {
@@ -643,5 +690,46 @@ describe("applyEvent / Stopped restart_pending", () => {
     });
     expect(state.workerStopped).toBe(false);
     expect(state.workerRestarting).toBe(true);
+  });
+});
+
+describe("applyEvent / WakeupScheduled lifecycle", () => {
+  it("user-typed prompt mid-wait keeps the pending wakeup", () => {
+    // Regression for #1091: a user-typed follow-up during the wait
+    // is NOT the wake firing. Reducer must keep `nextWakeupAt` when
+    // the scheduled time is still in the future.
+    const future = new Date(Date.now() + 95_000).toISOString();
+    let state = applyEvent(emptyCockpitState(), {
+      session_id: "s-1",
+      seq: 1,
+      event: { WakeupScheduled: { at: future, reason: "test wake" } },
+    });
+    expect(state.nextWakeupAt).toBe(future);
+    state = applyEvent(state, {
+      session_id: "s-1",
+      seq: 2,
+      event: { UserPromptSent: { text: "btw, ping me when you wake" } },
+    });
+    expect(state.nextWakeupAt).toBe(future);
+    expect(state.nextWakeupReason).toBe("test wake");
+  });
+
+  it("prompt after wakeup `at` clears the pending wakeup", () => {
+    // The self-fired prompt from /loop arrives once the scheduled
+    // moment has passed; that's the genuine wake-fired signal.
+    const past = new Date(Date.now() - 5_000).toISOString();
+    let state = applyEvent(emptyCockpitState(), {
+      session_id: "s-1",
+      seq: 1,
+      event: { WakeupScheduled: { at: past, reason: "test wake" } },
+    });
+    expect(state.nextWakeupAt).toBe(past);
+    state = applyEvent(state, {
+      session_id: "s-1",
+      seq: 2,
+      event: { UserPromptSent: { text: "Wake-up fired. Confirm." } },
+    });
+    expect(state.nextWakeupAt).toBeNull();
+    expect(state.nextWakeupReason).toBeNull();
   });
 });

@@ -34,6 +34,11 @@ pub struct SessionResponse {
     pub last_error: Option<String>,
     pub branch: Option<String>,
     pub main_repo_path: Option<String>,
+    /// Base branch the worktree was created from when AoE managed the
+    /// creation. None for sessions attached to a pre-existing branch,
+    /// or those that took the repo's default branch. See #948.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub base_branch: Option<String>,
     pub is_sandboxed: bool,
     pub has_managed_worktree: bool,
     pub has_terminal: bool,
@@ -81,6 +86,19 @@ pub struct SessionResponse {
     /// bridge in `acp_client::map_update_to_events`). See #1061.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub plan_summary: Option<PlanSummary>,
+    /// Absolute RFC3339 timestamp at which the cockpit session's
+    /// `ScheduleWakeup` tool will fire (i.e. the next turn is expected
+    /// to start). Cleared once a `UserPromptSent` lands after the
+    /// scheduling tool call; the /loop skill's self-firing emits that
+    /// prompt at wake time, so a wakeup whose seq is ≤ the latest
+    /// prompt has already fired. See #1091.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub next_wakeup_at: Option<String>,
+    /// User-facing reason the agent gave when scheduling the wakeup,
+    /// shown alongside the countdown chip / banner. Only set when
+    /// `next_wakeup_at` is also set. See #1091.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub next_wakeup_reason: Option<String>,
 }
 
 #[derive(Serialize, Clone, Debug)]
@@ -122,6 +140,8 @@ impl SessionResponse {
             None,
             #[cfg(feature = "serve")]
             crate::cockpit::supervisor::CockpitWorkerState::Absent,
+            None,
+            None,
         )
     }
 
@@ -134,6 +154,8 @@ impl SessionResponse {
         plan_summary: Option<PlanSummary>,
         #[cfg(feature = "serve")]
         cockpit_worker_state: crate::cockpit::supervisor::CockpitWorkerState,
+        next_wakeup_at: Option<String>,
+        next_wakeup_reason: Option<String>,
     ) -> Self {
         Self {
             id: inst.id.clone(),
@@ -152,6 +174,10 @@ impl SessionResponse {
                 .worktree_info
                 .as_ref()
                 .map(|w| w.main_repo_path.clone()),
+            base_branch: inst
+                .worktree_info
+                .as_ref()
+                .and_then(|w| w.base_branch.clone()),
             is_sandboxed: inst.is_sandboxed(),
             has_managed_worktree: inst
                 .worktree_info
@@ -189,6 +215,8 @@ impl SessionResponse {
                 .unwrap_or_default(),
             warnings: Vec::new(),
             plan_summary,
+            next_wakeup_at,
+            next_wakeup_reason,
         }
     }
 }
@@ -243,6 +271,14 @@ pub async fn list_sessions(State(state): State<Arc<AppState>>) -> Json<Vec<Sessi
             } else {
                 None
             };
+            let (next_wakeup_at, next_wakeup_reason) = if inst.cockpit_mode {
+                match state.cockpit_event_store.latest_pending_wakeup(&inst.id) {
+                    Some((at, reason)) => (Some(at.to_rfc3339()), reason),
+                    None => (None, None),
+                }
+            } else {
+                (None, None)
+            };
             #[cfg(feature = "serve")]
             let cockpit_worker_state = worker_states
                 .get(&inst.id)
@@ -254,6 +290,8 @@ pub async fn list_sessions(State(state): State<Arc<AppState>>) -> Json<Vec<Sessi
                 plan_summary,
                 #[cfg(feature = "serve")]
                 cockpit_worker_state,
+                next_wakeup_at,
+                next_wakeup_reason,
             )
         })
         .collect();
@@ -656,6 +694,12 @@ pub struct CreateSessionBody {
     pub worktree_branch: Option<String>,
     #[serde(default)]
     pub create_new_branch: bool,
+    /// Branch the new worktree branch is based on. Only honored when
+    /// `create_new_branch` is true; the server ignores it otherwise.
+    /// `None` (or empty) falls back to the repository's detected
+    /// default branch. See #948.
+    #[serde(default)]
+    pub base_branch: Option<String>,
     #[serde(default)]
     pub sandbox: bool,
     #[serde(default)]
@@ -824,6 +868,14 @@ pub async fn create_session(
             worktree_enabled: worktree_branch.is_some(),
             worktree_branch,
             create_new_branch: body.create_new_branch,
+            base_branch: if body.create_new_branch {
+                body.base_branch
+                    .as_ref()
+                    .map(|s| s.trim().to_string())
+                    .filter(|s| !s.is_empty())
+            } else {
+                None
+            },
             sandbox: body.sandbox,
             sandbox_image,
             yolo_mode: body.yolo_mode,
@@ -1831,12 +1883,36 @@ mod tests {
             main_repo_path: "/tmp/repo".to_string(),
             managed_by_aoe: true,
             created_at: chrono::Utc::now(),
+            base_branch: None,
         });
         assert_eq!(
             SessionResponse::from_instance(&inst, false)
                 .branch
                 .as_deref(),
             Some("feature/test")
+        );
+    }
+
+    #[test]
+    fn session_response_surfaces_base_branch_when_set() {
+        let mut inst = make_test_instance();
+        inst.worktree_info = Some(crate::session::WorktreeInfo {
+            branch: "feature/test".to_string(),
+            main_repo_path: "/tmp/repo".to_string(),
+            managed_by_aoe: true,
+            created_at: chrono::Utc::now(),
+            base_branch: Some("release-1.2".to_string()),
+        });
+        let resp = SessionResponse::from_instance(&inst, false);
+        assert_eq!(resp.base_branch.as_deref(), Some("release-1.2"));
+
+        // Field is omitted from the wire JSON when None so old clients
+        // don't see a flood of nulls.
+        inst.worktree_info.as_mut().unwrap().base_branch = None;
+        let json = serde_json::to_value(SessionResponse::from_instance(&inst, false)).unwrap();
+        assert!(
+            json.get("base_branch").is_none(),
+            "base_branch should be omitted when None, got: {json}"
         );
     }
 
@@ -1915,6 +1991,7 @@ mod tests {
             main_repo_path: "/tmp/repo".to_string(),
             managed_by_aoe: true,
             created_at: chrono::Utc::now(),
+            base_branch: None,
         });
 
         apply_session_title_rename(&mut inst, "Renamed Session".to_string());

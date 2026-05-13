@@ -166,7 +166,8 @@ export type CockpitEvent =
   | { AgentStartupError: { message: string } }
   | { UserPromptSent: { text: string } }
   | { AcpSessionAssigned: { acp_session_id: string } }
-  | { SessionContextReset: { reason: string } };
+  | { SessionContextReset: { reason: string } }
+  | { WakeupScheduled: { at: string; reason: string | null } };
 
 export interface CockpitFrame {
   session_id: string;
@@ -257,6 +258,20 @@ export interface CockpitState {
    *  On `Stopped` (when the worker is healthy) the head is popped and
    *  dispatched via the regular sendPrompt path. See #1031. */
   queuedPrompts: QueuedPrompt[];
+  /** ISO-8601 timestamp at which the agent's pending `ScheduleWakeup`
+   *  fires (i.e. when the next /loop turn is expected to start).
+   *  Cleared by `UserPromptSent` since /loop self-fires a prompt on
+   *  wake. See #1091. */
+  nextWakeupAt: string | null;
+  /** Reason the agent provided when scheduling the wakeup. Shown in
+   *  the cockpit banner next to the countdown. */
+  nextWakeupReason: string | null;
+  /** Set when the agent emitted `SessionContextReset` after a prior
+   *  user prompt: the model's context is empty but the visible
+   *  transcript is intact, so the user can opt in to fetching a
+   *  primer (last N turns) and pre-filling the composer with it.
+   *  Cleared by `UserPromptSent`. See #1004. */
+  contextPrimerAvailable: { resetSeq: number; reason: string } | null;
 }
 
 export interface QueuedPrompt {
@@ -318,6 +333,9 @@ export function emptyCockpitState(): CockpitState {
     workerStopped: false,
     workerRestarting: false,
     queuedPrompts: [],
+    nextWakeupAt: null,
+    nextWakeupReason: null,
+    contextPrimerAvailable: null,
   };
 }
 
@@ -602,6 +620,22 @@ export function applyEvent(
     // user_stopped banner without waiting for AcpSessionAssigned.
     next.workerStopped = false;
     next.workerRestarting = false;
+    // /loop dynamic mode self-fires a UserPromptSent on wake, but a
+    // user-typed follow-up during the wait is NOT the wake firing;
+    // only clear when the scheduled time has already elapsed. The
+    // countdown UI continues counting down through a mid-wait user
+    // prompt; the next ScheduleWakeup turn (or the wake itself)
+    // overrides it cleanly. See #1091.
+    if (next.nextWakeupAt) {
+      const wakeAt = new Date(next.nextWakeupAt).getTime();
+      if (!Number.isNaN(wakeAt) && Date.now() >= wakeAt) {
+        next.nextWakeupAt = null;
+        next.nextWakeupReason = null;
+      }
+    }
+    // Any pending context-primer offer is consumed once the user
+    // submits a new prompt; the recovery affordance is one-shot.
+    next.contextPrimerAvailable = null;
     return next;
   }
   if ("AcpSessionAssigned" in event) {
@@ -650,6 +684,21 @@ export function applyEvent(
         "Conversation context reset; agent transcript was unavailable.",
       at: new Date().toISOString(),
     });
+    // Offer the opt-in primer affordance. The banner only appears
+    // when there is a prior user prompt (we're already inside that
+    // branch), and stays one-shot: any UserPromptSent below clears
+    // it, even if the user typed something other than the primer.
+    next.contextPrimerAvailable = {
+      resetSeq: frame.seq,
+      reason:
+        event.SessionContextReset.reason ||
+        "Conversation context reset; agent transcript was unavailable.",
+    };
+    return next;
+  }
+  if ("WakeupScheduled" in event) {
+    next.nextWakeupAt = event.WakeupScheduled.at;
+    next.nextWakeupReason = event.WakeupScheduled.reason ?? null;
     return next;
   }
   // RawAgentUpdate, TodoListUpdated, anything else: pass through with

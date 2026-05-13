@@ -1007,6 +1007,8 @@ fn build_router(state: Arc<AppState>) -> Router {
         .route("/api/devices", get(api::list_devices))
         // About (version, auth status, read-only state)
         .route("/api/about", get(api::get_about))
+        // Update status (latest release, available flag)
+        .route("/api/system/update-status", get(api::get_update_status))
         // Terminal WebSockets
         .route("/sessions/{id}/ws", get(ws::terminal_ws))
         .route("/sessions/{id}/terminal/ws", get(ws::paired_terminal_ws))
@@ -1032,6 +1034,10 @@ fn build_router(state: Arc<AppState>) -> Router {
         .route(
             "/api/sessions/{id}/cockpit/replay",
             get(api::cockpit_replay),
+        )
+        .route(
+            "/api/sessions/{id}/cockpit/context-primer",
+            get(api::cockpit_context_primer),
         )
         .route(
             "/api/sessions/{id}/cockpit/mode",
@@ -1485,6 +1491,59 @@ async fn cockpit_event_listener(state: Arc<AppState>) {
                 return;
             }
         };
+
+        // Detect wake-fire: a `UserPromptSent` arriving at-or-after a
+        // `WakeupScheduled`'s `at` timestamp means the agent's pending
+        // wake just fired. Push opt-in to the user's phone so /loop
+        // dynamic runs don't need them to keep checking the dashboard.
+        // See #1091.
+        if matches!(
+            frame.event.as_ref(),
+            crate::cockpit::state::Event::UserPromptSent { .. }
+        ) {
+            match state
+                .cockpit_event_store
+                .fired_wakeup_for_prompt(&frame.session_id, frame.seq)
+            {
+                Some((at, reason)) => {
+                    let session_id = frame.session_id.clone();
+                    let session_title = state
+                        .instances
+                        .read()
+                        .await
+                        .iter()
+                        .find(|i| i.id == session_id)
+                        .map(|i| i.title.clone())
+                        .unwrap_or_default();
+                    tracing::info!(
+                        target: "cockpit.wakeup",
+                        session = %session_id,
+                        prompt_seq = frame.seq,
+                        wake_at = %at,
+                        reason = ?reason,
+                        "wake-fire detected; dispatching push notification"
+                    );
+                    let state_for_push = state.clone();
+                    tokio::spawn(async move {
+                        crate::server::push::fire_wake_fired_push(
+                            state_for_push,
+                            &session_id,
+                            &session_title,
+                            reason.as_deref(),
+                        )
+                        .await;
+                    });
+                }
+                None => {
+                    tracing::trace!(
+                        target: "cockpit.wakeup",
+                        session = %frame.session_id,
+                        prompt_seq = frame.seq,
+                        "UserPromptSent: no fired-wake match (regular follow-up)"
+                    );
+                }
+            }
+        }
 
         let status_intent = derive_cockpit_status(frame.event.as_ref());
         let acp_change = derive_acp_session_change(frame.event.as_ref());

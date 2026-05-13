@@ -437,6 +437,15 @@ pub struct WebConfig {
     /// Server-wide default: fire a push on Running to Error transitions.
     #[serde(default = "default_true")]
     pub notify_on_error: bool,
+
+    /// Server-wide default: fire a push when a cockpit session's
+    /// `ScheduleWakeup` timer fires (the next /loop turn starts). On by
+    /// default because the headline use case for `/loop` dynamic mode
+    /// is "walk away during the sleep window"; without a push the
+    /// user has to keep peeking at the dashboard. Suppression for
+    /// active TUI / web sessions still applies. See #1091.
+    #[serde(default = "default_true")]
+    pub notify_on_wake_fire: bool,
 }
 
 impl Default for WebConfig {
@@ -446,6 +455,7 @@ impl Default for WebConfig {
             notify_on_waiting: true,
             notify_on_idle: false,
             notify_on_error: true,
+            notify_on_wake_fire: true,
         }
     }
 }
@@ -516,6 +526,14 @@ pub struct UpdatesConfig {
 
     #[serde(default = "default_true")]
     pub notify_in_cli: bool,
+
+    /// How often the web dashboard re-polls `/api/system/update-status`
+    /// while a tab is open. Server-side cache is governed by
+    /// `check_interval_hours`; this knob only controls how aggressively
+    /// the frontend asks. Keep it lower than `check_interval_hours * 60`
+    /// or every poll is a cache hit. See #984.
+    #[serde(default = "default_web_poll_interval_minutes")]
+    pub web_poll_interval_minutes: u64,
 }
 
 impl Default for UpdatesConfig {
@@ -524,6 +542,7 @@ impl Default for UpdatesConfig {
             check_enabled: true,
             check_interval_hours: 24,
             notify_in_cli: true,
+            web_poll_interval_minutes: 60,
         }
     }
 }
@@ -534,6 +553,10 @@ fn default_true() -> bool {
 
 fn default_check_interval() -> u64 {
     24
+}
+
+fn default_web_poll_interval_minutes() -> u64 {
+    60
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -1197,6 +1197,55 @@ fn transcript_event_kind(event: &Event) -> &'static str {
     }
 }
 
+/// Build a `WakeupScheduled` event from a `ScheduleWakeup` tool's
+/// raw_input. Reads `delaySeconds` (number, falls back to numeric
+/// string) and the optional `reason`; computes the absolute wake
+/// timestamp from `Utc::now()`. Returns `None` if `delaySeconds` is
+/// missing or non-finite, better to skip the event than publish a
+/// wakeup at epoch zero. See #1091.
+fn wakeup_event_from_raw(raw_input: &serde_json::Value) -> Option<Event> {
+    let Some(delay_value) = raw_input.get("delaySeconds") else {
+        debug!(
+            target: "cockpit.acp.wakeup",
+            "ScheduleWakeup raw_input missing `delaySeconds`; not emitting WakeupScheduled"
+        );
+        return None;
+    };
+    let Some(delay_secs) = delay_value
+        .as_f64()
+        .or_else(|| delay_value.as_str().and_then(|s| s.parse().ok()))
+    else {
+        debug!(
+            target: "cockpit.acp.wakeup",
+            value = %delay_value,
+            "ScheduleWakeup `delaySeconds` not numeric; not emitting WakeupScheduled"
+        );
+        return None;
+    };
+    if !delay_secs.is_finite() || delay_secs < 0.0 {
+        warn!(
+            target: "cockpit.acp.wakeup",
+            delay_secs,
+            "ScheduleWakeup `delaySeconds` non-finite or negative; refusing to emit"
+        );
+        return None;
+    }
+    let delay_ms = (delay_secs * 1000.0).clamp(0.0, i64::MAX as f64) as i64;
+    let at = chrono::Utc::now() + chrono::Duration::milliseconds(delay_ms);
+    let reason = raw_input
+        .get("reason")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+    info!(
+        target: "cockpit.acp.wakeup",
+        delay_secs,
+        wake_at = %at,
+        reason = ?reason,
+        "emitting WakeupScheduled from ScheduleWakeup tool args"
+    );
+    Some(Event::WakeupScheduled { at, reason })
+}
+
 /// Parse Claude's ExitPlanMode tool input into a structured `Plan`.
 /// Claude ships the plan markdown in `raw_input.plan`; we extract its
 /// bullet- or number-prefixed lines as `PlanStep`s with status=Pending,
@@ -1391,6 +1440,17 @@ fn map_update_to_events(update: SessionUpdate) -> Vec<Event> {
                     events.push(Event::PlanUpdated { plan });
                 }
             }
+            // The Claude Agent SDK's `ScheduleWakeup` tool sleeps the
+            // session until `now + delaySeconds`, with `/loop` dynamic
+            // mode self-firing a fresh prompt when the wake triggers.
+            // Capture an absolute `at` timestamp here so the sidebar
+            // countdown survives daemon restarts and never has to parse
+            // the natural-language output string. See #1091.
+            if tc.title == "ScheduleWakeup" {
+                if let Some(event) = wakeup_event_from_raw(&raw_args) {
+                    events.push(event);
+                }
+            }
             events
         }
         SessionUpdate::ToolCallUpdate(update) => {
@@ -1450,6 +1510,20 @@ fn map_update_to_events(update: SessionUpdate) -> Vec<Event> {
                 });
             } else if events.is_empty() {
                 events.push(raw_event(&update));
+            }
+            // claude-agent-acp emits the initial `tool_call` frame for
+            // ScheduleWakeup with empty `raw_input`; the actual
+            // `delaySeconds` lands on a subsequent `ToolCallUpdate`. The
+            // emit path in the `ToolCall` branch above therefore never
+            // sees real args and `wakeup_event_from_raw` returns None,
+            // so re-check here when the update carries both the title
+            // and a populated raw_input. See #1091.
+            if matches!(update.fields.title.as_deref(), Some("ScheduleWakeup")) {
+                if let Some(raw) = update.fields.raw_input.as_ref() {
+                    if let Some(event) = wakeup_event_from_raw(raw) {
+                        events.push(event);
+                    }
+                }
             }
             events
         }
@@ -3053,6 +3127,65 @@ mod tests {
             }
             other => panic!("expected ToolCallUpdated, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn map_tool_call_update_emits_wakeup_when_title_and_raw_input_land_in_update() {
+        // claude-agent-acp sends the initial `ToolCall` for ScheduleWakeup
+        // with `raw_input = {}`; the real `delaySeconds` arrives on a
+        // follow-up `ToolCallUpdate` that carries both `title` and
+        // `raw_input`. The initial-path emit therefore returns `None`
+        // from `wakeup_event_from_raw`, and the update-path must pick up
+        // the slack so `Event::WakeupScheduled` lands in the store
+        // (sidebar `⏰ in Nm` chip + cockpit "Asleep until…" banner
+        // depend on it). Regression for #1091.
+        use agent_client_protocol::schema::{ToolCallUpdate, ToolCallUpdateFields};
+        let fields = ToolCallUpdateFields::new()
+            .title("ScheduleWakeup".to_string())
+            .raw_input(serde_json::json!({
+                "delaySeconds": 600,
+                "prompt": "Wake-up fired. Confirm.",
+                "reason": "Test 10-minute wake-up card countdown",
+            }));
+        let update = ToolCallUpdate::new("toolu_test", fields);
+        let events = map_update_to_events(SessionUpdate::ToolCallUpdate(update));
+        let wakeup = events
+            .iter()
+            .find(|e| matches!(e, Event::WakeupScheduled { .. }))
+            .expect(
+                "ToolCallUpdate with title=ScheduleWakeup + delaySeconds must emit WakeupScheduled",
+            );
+        match wakeup {
+            Event::WakeupScheduled { at, reason } => {
+                let delta = (*at - chrono::Utc::now()).num_seconds();
+                assert!(
+                    (590..=610).contains(&delta),
+                    "wakeup `at` should be ~600s in the future, got {delta}s",
+                );
+                assert_eq!(
+                    reason.as_deref(),
+                    Some("Test 10-minute wake-up card countdown"),
+                );
+            }
+            other => panic!("expected WakeupScheduled, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn map_tool_call_update_skips_wakeup_when_raw_input_missing() {
+        // Title-only update (the initial frame's mirror, before
+        // raw_input arrives) must NOT emit a WakeupScheduled, otherwise
+        // we'd publish a "wakeup at epoch zero" placeholder.
+        use agent_client_protocol::schema::{ToolCallUpdate, ToolCallUpdateFields};
+        let fields = ToolCallUpdateFields::new().title("ScheduleWakeup".to_string());
+        let update = ToolCallUpdate::new("toolu_test", fields);
+        let events = map_update_to_events(SessionUpdate::ToolCallUpdate(update));
+        assert!(
+            !events
+                .iter()
+                .any(|e| matches!(e, Event::WakeupScheduled { .. })),
+            "no WakeupScheduled should fire without delaySeconds",
+        );
     }
 
     #[test]

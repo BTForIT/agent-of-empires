@@ -50,6 +50,7 @@ use std::path::Path;
 use std::sync::Mutex;
 
 use anyhow::{Context, Result};
+use chrono::{DateTime, Utc};
 use rusqlite::{params, Connection, OptionalExtension};
 use tracing::{debug, trace, warn};
 
@@ -205,6 +206,53 @@ impl EventStore {
         Ok(())
     }
 
+    /// Return all events for `session_id` with `seq < before`, oldest
+    /// first. Used by the context-primer endpoint to fetch only the
+    /// transcript that precedes a `SessionContextReset` event without
+    /// having to over-fetch and filter client-side. See #1004.
+    pub fn replay_before(&self, session_id: &str, before: u64) -> Vec<(u64, Event)> {
+        let conn = match self.conn.lock() {
+            Ok(g) => g,
+            Err(p) => p.into_inner(),
+        };
+        let mut stmt = match conn.prepare(
+            "SELECT seq, event_json FROM cockpit_events
+             WHERE session_id = ?1 AND seq < ?2
+             ORDER BY seq ASC",
+        ) {
+            Ok(s) => s,
+            Err(e) => {
+                warn!(target: "cockpit.event_store", "prepare replay_before for {session_id}: {e}");
+                return Vec::new();
+            }
+        };
+        let rows = match stmt.query_map(params![session_id, before as i64], |row| {
+            let seq: i64 = row.get(0)?;
+            let json: String = row.get(1)?;
+            Ok((seq as u64, json))
+        }) {
+            Ok(r) => r,
+            Err(e) => {
+                warn!(target: "cockpit.event_store", "query replay_before for {session_id}: {e}");
+                return Vec::new();
+            }
+        };
+        let mut out = Vec::new();
+        for row in rows {
+            match row {
+                Ok((seq, json)) => match serde_json::from_str::<Event>(&json) {
+                    Ok(event) => out.push((seq, event)),
+                    Err(e) => warn!(
+                        target: "cockpit.event_store",
+                        "deserialise event {session_id}@{seq}: {e}"
+                    ),
+                },
+                Err(e) => warn!(target: "cockpit.event_store", "row error: {e}"),
+            }
+        }
+        out
+    }
+
     /// Return all events for `session_id` with `seq > since`, oldest
     /// first. An empty vec means the session has no newer events.
     pub fn replay_from(&self, session_id: &str, since: u64) -> Vec<(u64, Event)> {
@@ -285,6 +333,223 @@ impl EventStore {
         } else {
             None
         }
+    }
+
+    /// Return the most recent unfired `WakeupScheduled` for `session_id`.
+    /// "Pending" means the latest scheduled `at` is still in the future;
+    /// the previous heuristic (any `UserPromptSent` with a higher seq
+    /// marks the wakeup as fired) is wrong because a user-typed
+    /// follow-up message during the wait wasn't the wake firing; the
+    /// next ScheduleWakeup turn could still arrive minutes later. Pick
+    /// the latest WakeupScheduled and gate on the timestamp instead.
+    /// See #1091.
+    pub fn latest_pending_wakeup(
+        &self,
+        session_id: &str,
+    ) -> Option<(DateTime<Utc>, Option<String>)> {
+        let conn = match self.conn.lock() {
+            Ok(g) => g,
+            Err(p) => p.into_inner(),
+        };
+        let json: Option<String> = conn
+            .query_row(
+                "SELECT event_json FROM cockpit_events
+                 WHERE session_id = ?1
+                   AND event_json LIKE '{\"WakeupScheduled\":%'
+                 ORDER BY seq DESC LIMIT 1",
+                params![session_id],
+                |row| row.get(0),
+            )
+            .optional()
+            .ok()
+            .flatten();
+        let Some(json) = json else {
+            trace!(
+                target: "cockpit.event_store",
+                session = %session_id,
+                "latest_pending_wakeup: no WakeupScheduled row"
+            );
+            return None;
+        };
+        let event: Event = match serde_json::from_str(&json) {
+            Ok(e) => e,
+            Err(e) => {
+                warn!(
+                    target: "cockpit.event_store",
+                    session = %session_id,
+                    "latest_pending_wakeup: deserialise failed: {e}"
+                );
+                return None;
+            }
+        };
+        if let Event::WakeupScheduled { at, reason } = event {
+            let now = Utc::now();
+            if at > now {
+                trace!(
+                    target: "cockpit.event_store",
+                    session = %session_id,
+                    wake_at = %at,
+                    in_secs = (at - now).num_seconds(),
+                    "latest_pending_wakeup: still pending"
+                );
+                Some((at, reason))
+            } else {
+                trace!(
+                    target: "cockpit.event_store",
+                    session = %session_id,
+                    wake_at = %at,
+                    elapsed_secs = (now - at).num_seconds(),
+                    "latest_pending_wakeup: wake `at` in past; treating as fired"
+                );
+                None
+            }
+        } else {
+            None
+        }
+    }
+
+    /// Given the seq of a just-published `UserPromptSent`, return the
+    /// `WakeupScheduled` whose timer just fired (so the cockpit event
+    /// listener can dispatch a push notification). A prompt counts as
+    /// the wake-fired prompt when:
+    ///
+    /// 1. There is a `WakeupScheduled` with seq < `prompt_seq` for this
+    ///    session.
+    /// 2. The wakeup's `at` timestamp is at-or-before the prompt's
+    ///    `created_at` (the scheduled moment has actually elapsed by
+    ///    the time the prompt arrived; a user-typed message *during*
+    ///    the wait must not count as the wake firing).
+    /// 3. No earlier prompt has already "claimed" the same wakeup,
+    ///    i.e. no `UserPromptSent` exists with seq strictly between the
+    ///    wakeup's seq and `prompt_seq` whose `created_at` is also
+    ///    at-or-after the wakeup's `at`. The first prompt past the
+    ///    wake's `at` line wins; later prompts are regular follow-ups.
+    ///
+    /// Returns `None` for the common case (regular user-typed prompt
+    /// with no pending wake). See #1091.
+    pub fn fired_wakeup_for_prompt(
+        &self,
+        session_id: &str,
+        prompt_seq: u64,
+    ) -> Option<(DateTime<Utc>, Option<String>)> {
+        let conn = match self.conn.lock() {
+            Ok(g) => g,
+            Err(p) => p.into_inner(),
+        };
+        let prompt_seq_i64 = prompt_seq as i64;
+        // Fetch the prompt's own created_at (ms since epoch).
+        let prompt_created_ms: i64 = match conn
+            .query_row(
+                "SELECT created_at FROM cockpit_events
+                 WHERE session_id = ?1 AND seq = ?2",
+                params![session_id, prompt_seq_i64],
+                |row| row.get(0),
+            )
+            .optional()
+            .ok()
+            .flatten()
+        {
+            Some(v) => v,
+            None => {
+                trace!(
+                    target: "cockpit.event_store",
+                    session = %session_id,
+                    seq = prompt_seq,
+                    "fired_wakeup_for_prompt: prompt row missing"
+                );
+                return None;
+            }
+        };
+        // Latest WakeupScheduled with seq < prompt_seq.
+        let row: Option<(i64, String)> = conn
+            .query_row(
+                "SELECT seq, event_json FROM cockpit_events
+                 WHERE session_id = ?1
+                   AND seq < ?2
+                   AND event_json LIKE '{\"WakeupScheduled\":%'
+                 ORDER BY seq DESC LIMIT 1",
+                params![session_id, prompt_seq_i64],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()
+            .ok()
+            .flatten();
+        let (wake_seq, wake_json) = match row {
+            Some(t) => t,
+            None => {
+                trace!(
+                    target: "cockpit.event_store",
+                    session = %session_id,
+                    prompt_seq,
+                    "fired_wakeup_for_prompt: no prior WakeupScheduled"
+                );
+                return None;
+            }
+        };
+        let event: Event = match serde_json::from_str(&wake_json) {
+            Ok(e) => e,
+            Err(e) => {
+                warn!(
+                    target: "cockpit.event_store",
+                    session = %session_id,
+                    wake_seq,
+                    "fired_wakeup_for_prompt: deserialise failed: {e}"
+                );
+                return None;
+            }
+        };
+        let (at, reason) = match event {
+            Event::WakeupScheduled { at, reason } => (at, reason),
+            _ => return None,
+        };
+        let at_ms = at.timestamp_millis();
+        // Wake must already have fired by the time the prompt arrived.
+        if at_ms > prompt_created_ms {
+            debug!(
+                target: "cockpit.event_store",
+                session = %session_id,
+                prompt_seq,
+                wake_seq,
+                wake_at = %at,
+                "fired_wakeup_for_prompt: wake `at` still in future relative to prompt; mid-wait follow-up, not a fire"
+            );
+            return None;
+        }
+        // Dedup: another prompt with seq between (wake_seq, prompt_seq)
+        // and created_at >= at means *that* prompt already claimed the
+        // wake-fire (we'd have fired a push for it then).
+        let claimed: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM cockpit_events
+                 WHERE session_id = ?1
+                   AND seq > ?2
+                   AND seq < ?3
+                   AND event_json LIKE '{\"UserPromptSent\":%'
+                   AND created_at >= ?4",
+                params![session_id, wake_seq, prompt_seq_i64, at_ms],
+                |row| row.get(0),
+            )
+            .unwrap_or(0);
+        if claimed > 0 {
+            debug!(
+                target: "cockpit.event_store",
+                session = %session_id,
+                prompt_seq,
+                wake_seq,
+                claimed,
+                "fired_wakeup_for_prompt: another prompt already claimed this wake"
+            );
+            return None;
+        }
+        debug!(
+            target: "cockpit.event_store",
+            session = %session_id,
+            prompt_seq,
+            wake_seq,
+            wake_at = %at,
+            "fired_wakeup_for_prompt: detected wake-fire"
+        );
+        Some((at, reason))
     }
 
     /// Return the highest seq stored for `session_id`, or 0 if none.
@@ -465,6 +730,7 @@ fn event_kind(event: &Event) -> &'static str {
         Event::UserPromptSent { .. } => "user_prompt_sent",
         Event::AcpSessionAssigned { .. } => "acp_session_assigned",
         Event::SessionContextReset { .. } => "session_context_reset",
+        Event::WakeupScheduled { .. } => "wakeup_scheduled",
     }
 }
 
@@ -809,6 +1075,202 @@ mod tests {
             .record("s-1", 4, &Event::AgentMessageChunk { text: "mid".into() })
             .unwrap();
         assert!(store.has_in_flight_turn("s-1"));
+    }
+
+    #[test]
+    fn latest_pending_wakeup_returns_future_wakeup_even_after_user_prompt() {
+        // Regression for #1091: the old query treated any UserPromptSent
+        // with a higher seq than the WakeupScheduled as evidence the
+        // wake had already fired, which hid the sidebar countdown +
+        // cockpit "Asleep until …" banner whenever the user typed a
+        // follow-up message during the wait. Pending now gates purely
+        // on `at > now()`.
+        let (_tmp, store) = open_store(1000);
+        let at = Utc::now() + chrono::Duration::seconds(120);
+        store
+            .record(
+                "s-1",
+                1,
+                &Event::UserPromptSent {
+                    text: "schedule a wake in 2m".into(),
+                },
+            )
+            .unwrap();
+        store
+            .record(
+                "s-1",
+                2,
+                &Event::WakeupScheduled {
+                    at,
+                    reason: Some("test wake".into()),
+                },
+            )
+            .unwrap();
+        // User-typed follow-up while the wake is still pending.
+        store
+            .record(
+                "s-1",
+                3,
+                &Event::UserPromptSent {
+                    text: "btw, ping me when you wake".into(),
+                },
+            )
+            .unwrap();
+        let pending = store.latest_pending_wakeup("s-1").expect("still pending");
+        assert!((pending.0 - at).num_seconds().abs() <= 1);
+        assert_eq!(pending.1.as_deref(), Some("test wake"));
+    }
+
+    #[test]
+    fn latest_pending_wakeup_returns_none_when_at_in_past() {
+        let (_tmp, store) = open_store(1000);
+        let at = Utc::now() - chrono::Duration::seconds(30);
+        store
+            .record("s-1", 1, &Event::WakeupScheduled { at, reason: None })
+            .unwrap();
+        assert!(store.latest_pending_wakeup("s-1").is_none());
+    }
+
+    #[test]
+    fn latest_pending_wakeup_uses_latest_scheduled_event() {
+        // When the agent reschedules mid-flight, the latest
+        // WakeupScheduled supersedes the earlier one. The query must
+        // pick the latest by seq, not by `at` ordering; that's the
+        // single source of truth for the active wake.
+        let (_tmp, store) = open_store(1000);
+        let earlier = Utc::now() + chrono::Duration::seconds(60);
+        let later = Utc::now() + chrono::Duration::seconds(600);
+        store
+            .record(
+                "s-1",
+                1,
+                &Event::WakeupScheduled {
+                    at: earlier,
+                    reason: Some("first schedule".into()),
+                },
+            )
+            .unwrap();
+        store
+            .record(
+                "s-1",
+                2,
+                &Event::WakeupScheduled {
+                    at: later,
+                    reason: Some("rescheduled".into()),
+                },
+            )
+            .unwrap();
+        let pending = store.latest_pending_wakeup("s-1").expect("pending");
+        assert_eq!(pending.1.as_deref(), Some("rescheduled"));
+    }
+
+    #[test]
+    fn fired_wakeup_for_prompt_skips_mid_wait_user_followup() {
+        // Regression for #1091: a user-typed prompt arriving BEFORE the
+        // wake `at` must not count as the wake firing. Same flaw as
+        // `latest_pending_wakeup`; mirrored here so we don't dispatch
+        // a false-positive push notification.
+        let (_tmp, store) = open_store(1000);
+        // Wake `at` is in the future relative to the follow-up prompt
+        // we'll record. Use a 5-minute offset so the test isn't racy
+        // against wall-clock skew.
+        let at = Utc::now() + chrono::Duration::seconds(300);
+        store
+            .record(
+                "s-1",
+                1,
+                &Event::UserPromptSent {
+                    text: "schedule a wake".into(),
+                },
+            )
+            .unwrap();
+        store
+            .record(
+                "s-1",
+                2,
+                &Event::WakeupScheduled {
+                    at,
+                    reason: Some("test wake".into()),
+                },
+            )
+            .unwrap();
+        // Mid-wait follow-up: created now, but the wake `at` is +5m.
+        store
+            .record(
+                "s-1",
+                3,
+                &Event::UserPromptSent {
+                    text: "ping me when you wake".into(),
+                },
+            )
+            .unwrap();
+        assert!(
+            store.fired_wakeup_for_prompt("s-1", 3).is_none(),
+            "mid-wait follow-up must not count as wake-fire",
+        );
+    }
+
+    #[test]
+    fn fired_wakeup_for_prompt_returns_first_prompt_past_wake_at() {
+        let (_tmp, store) = open_store(1000);
+        let at = Utc::now() - chrono::Duration::seconds(5);
+        store
+            .record(
+                "s-1",
+                1,
+                &Event::WakeupScheduled {
+                    at,
+                    reason: Some("test wake".into()),
+                },
+            )
+            .unwrap();
+        store
+            .record(
+                "s-1",
+                2,
+                &Event::UserPromptSent {
+                    text: "Wake-up fired. Confirm.".into(),
+                },
+            )
+            .unwrap();
+        let fired = store
+            .fired_wakeup_for_prompt("s-1", 2)
+            .expect("first prompt past wake `at` is the wake-fire");
+        assert_eq!(fired.1.as_deref(), Some("test wake"));
+    }
+
+    #[test]
+    fn fired_wakeup_for_prompt_doesnt_double_claim() {
+        // Once a prompt has claimed the wake-fire, later prompts on
+        // the same wake must not re-fire the push.
+        let (_tmp, store) = open_store(1000);
+        let at = Utc::now() - chrono::Duration::seconds(60);
+        store
+            .record("s-1", 1, &Event::WakeupScheduled { at, reason: None })
+            .unwrap();
+        store
+            .record(
+                "s-1",
+                2,
+                &Event::UserPromptSent {
+                    text: "first prompt past at".into(),
+                },
+            )
+            .unwrap();
+        store
+            .record(
+                "s-1",
+                3,
+                &Event::UserPromptSent {
+                    text: "second prompt past at".into(),
+                },
+            )
+            .unwrap();
+        assert!(store.fired_wakeup_for_prompt("s-1", 2).is_some());
+        assert!(
+            store.fired_wakeup_for_prompt("s-1", 3).is_none(),
+            "second prompt past the wake's `at` must not claim again",
+        );
     }
 
     #[test]
