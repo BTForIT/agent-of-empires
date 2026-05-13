@@ -18,6 +18,7 @@ mod restart;
 mod send_message;
 #[cfg(feature = "serve")]
 mod serve;
+mod snooze_duration;
 mod update_confirm;
 mod welcome;
 
@@ -41,6 +42,7 @@ pub use restart::{RestartData, RestartDialog};
 pub use send_message::SendMessageDialog;
 #[cfg(feature = "serve")]
 pub use serve::{ServeAction, ServeView};
+pub use snooze_duration::SnoozeDurationDialog;
 pub use update_confirm::UpdateConfirmDialog;
 pub use welcome::WelcomeDialog;
 
