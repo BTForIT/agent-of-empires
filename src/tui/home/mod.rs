@@ -304,8 +304,7 @@ impl HomeView {
         // by sessions destroyed while the TUI was not running. Per-session
         // cleanup on destroy is handled by cleanup_hook_status_dir in
         // src/session/deletion.rs; this is the catch-up pass.
-        let live_ids: std::collections::HashSet<String> =
-            instance_map.keys().cloned().collect();
+        let live_ids: std::collections::HashSet<String> = instance_map.keys().cloned().collect();
         crate::hooks::sweep_orphaned_hook_dirs(&live_ids);
 
         // In unified mode, config comes from "default" profile
