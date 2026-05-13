@@ -31,7 +31,16 @@ use crate::migrations;
 /// reliably forward mouse-tracking escape sequences to mobile clients).
 /// Set `AOE_MOUSE_CAPTURE=1` on a desktop terminal to opt into the
 /// preview-pane mouse-wheel scroll feature added in #795.
+///
+/// Mosh auto-override: when `MOSH_CONNECTION` is present we ignore the
+/// opt-in and stay OFF. Mosh mangles xterm mouse-tracking escapes, so
+/// leaving capture ON produces inverted/duplicated scroll on mobile
+/// clients even when the user has `AOE_MOUSE_CAPTURE=1` set globally
+/// for their desktop terminal.
 pub fn mouse_capture_requested() -> bool {
+    if std::env::var_os("MOSH_CONNECTION").is_some() {
+        return false;
+    }
     std::env::var("AOE_MOUSE_CAPTURE")
         .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
         .unwrap_or(false)
