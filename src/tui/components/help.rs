@@ -42,6 +42,7 @@ fn shortcuts(strict: bool) -> Vec<(&'static str, Vec<(&'static str, &'static str
                     ("Z", "Archive (toggle)"),
                     ("R", "Rename session/group"),
                     ("M", "Send message to agent"),
+                    ("F", "Toggle favorite"),
                 ],
             ),
             (
@@ -99,6 +100,7 @@ fn shortcuts(strict: bool) -> Vec<(&'static str, Vec<(&'static str, &'static str
                     ("z", "Archive (toggle)"),
                     ("r", "Rename session/group"),
                     ("m", "Send message to agent"),
+                    ("f", "Toggle favorite"),
                 ],
             ),
             (

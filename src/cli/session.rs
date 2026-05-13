@@ -49,6 +49,14 @@ pub enum SessionCommands {
 
     /// Unarchive a session (restores it to its tier in the Attention sort)
     Unarchive(SessionIdArgs),
+
+    /// Mark a session as a favorite. Favorited rows pin to the top of
+    /// their status tier in the Attention sort and render with a leading
+    /// `* ` glyph plus bold + underline.
+    Favorite(SessionIdArgs),
+
+    /// Clear the favorite flag on a session.
+    Unfavorite(SessionIdArgs),
 }
 
 #[derive(Args)]
@@ -199,6 +207,8 @@ pub async fn run(profile: &str, command: SessionCommands) -> Result<()> {
         SessionCommands::Unsnooze(args) => unsnooze_session(profile, args).await,
         SessionCommands::Archive(args) => archive_session(profile, args).await,
         SessionCommands::Unarchive(args) => unarchive_session(profile, args).await,
+        SessionCommands::Favorite(args) => favorite_session(profile, args).await,
+        SessionCommands::Unfavorite(args) => unfavorite_session(profile, args).await,
     }
 }
 
@@ -254,6 +264,52 @@ async fn unarchive_session(profile: &str, args: SessionIdArgs) -> Result<()> {
     storage.save_with_groups(&instances, &group_tree)?;
 
     println!("Unarchived: {}", title);
+    Ok(())
+}
+
+async fn favorite_session(profile: &str, args: SessionIdArgs) -> Result<()> {
+    let storage = Storage::new(profile)?;
+    let (mut instances, groups) = storage.load_with_groups()?;
+
+    let idx = instances
+        .iter()
+        .position(|i| {
+            i.id == args.identifier
+                || i.id.starts_with(&args.identifier)
+                || i.title == args.identifier
+        })
+        .ok_or_else(|| anyhow::anyhow!("Session not found: {}", args.identifier))?;
+
+    instances[idx].favorite();
+    let title = instances[idx].title.clone();
+
+    let group_tree = GroupTree::new_with_groups(&instances, &groups);
+    storage.save_with_groups(&instances, &group_tree)?;
+
+    println!("Favorited: {}", title);
+    Ok(())
+}
+
+async fn unfavorite_session(profile: &str, args: SessionIdArgs) -> Result<()> {
+    let storage = Storage::new(profile)?;
+    let (mut instances, groups) = storage.load_with_groups()?;
+
+    let idx = instances
+        .iter()
+        .position(|i| {
+            i.id == args.identifier
+                || i.id.starts_with(&args.identifier)
+                || i.title == args.identifier
+        })
+        .ok_or_else(|| anyhow::anyhow!("Session not found: {}", args.identifier))?;
+
+    instances[idx].unfavorite();
+    let title = instances[idx].title.clone();
+
+    let group_tree = GroupTree::new_with_groups(&instances, &groups);
+    storage.save_with_groups(&instances, &group_tree)?;
+
+    println!("Unfavorited: {}", title);
     Ok(())
 }
 

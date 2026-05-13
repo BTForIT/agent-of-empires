@@ -22,6 +22,11 @@ export interface SessionResponse {
    *  those that took the repo's default branch. See #948. */
   base_branch?: string | null;
   is_sandboxed: boolean;
+  /** True when the session is marked as a user favorite. Mirrors
+   *  `Instance::is_favorited()` server-side. The sidebar pins favorited
+   *  rows and prepends a `*` marker. Toggled via the TUI `f`/`F` keybind
+   *  or `aoe session favorite|unfavorite`. */
+  favorited: boolean;
   has_managed_worktree: boolean;
   has_terminal: boolean;
   profile: string;
