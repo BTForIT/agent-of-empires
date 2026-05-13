@@ -48,22 +48,13 @@ pub struct UnifiedDeleteDialog {
 }
 
 impl UnifiedDeleteDialog {
-    pub fn new(session_title: String, config: DeleteDialogConfig, profile: &str) -> Self {
-        let user_config = match config.project_path.as_ref() {
-            Some(p) => crate::session::repo_config::resolve_config_with_repo_or_warn(
-                profile,
-                std::path::Path::new(p),
-            ),
-            None => crate::session::profile_config::resolve_config_or_warn(profile),
-        };
-
-        let options = DeleteOptions {
-            delete_worktree: config.worktree_branch.is_some() && user_config.worktree.auto_cleanup,
-            force_delete: false,
-            delete_branch: config.worktree_branch.is_some()
-                && user_config.worktree.delete_branch_on_cleanup,
-            delete_sandbox: config.has_sandbox && user_config.sandbox.auto_cleanup,
-        };
+    pub fn new(session_title: String, config: DeleteDialogConfig, _profile: &str) -> Self {
+        // Delete-as-archive flips the dialog into opt-in-destruction mode:
+        // submitting with every box unchecked archives the session and kills
+        // its pane (worktree, branch, container preserved). The user must
+        // tick a box per resource they want destroyed, so a habitual Y press
+        // can't surprise-delete a managed worktree.
+        let options = DeleteOptions::default();
 
         let initial_focus = if config.worktree_branch.is_some() {
             FocusElement::WorktreeCheckbox
@@ -477,29 +468,39 @@ mod tests {
     }
 
     #[test]
-    fn test_full_dialog_respects_config_defaults() {
+    fn test_full_dialog_defaults_to_archive() {
+        // Delete-as-archive: the dialog opens with every box unchecked so a
+        // habitual Y press archives instead of destroying. The user must opt
+        // into each cleanup step. Previously the dialog pre-checked boxes
+        // based on `worktree.auto_cleanup` / `sandbox.auto_cleanup` defaults
+        // and one accidental Enter would nuke a managed worktree.
         let dialog = full_dialog();
         assert!(
-            dialog.options.delete_worktree,
-            "With default config (auto_cleanup: true), delete_worktree should be true"
+            !dialog.options.delete_worktree,
+            "delete_worktree should default to false (opt in)"
         );
         assert!(
             !dialog.options.delete_branch,
-            "With default config (delete_branch_on_cleanup: false), delete_branch should be false"
+            "delete_branch should default to false (opt in)"
         );
         assert!(
-            dialog.options.delete_sandbox,
-            "With default config (auto_cleanup: true), delete_sandbox should be true"
+            !dialog.options.delete_sandbox,
+            "delete_sandbox should default to false (opt in)"
+        );
+        assert!(
+            !dialog.options.force_delete,
+            "force_delete should default to false"
         );
     }
 
     #[test]
     fn test_tab_cycles_through_elements() {
+        // With opt-in destruction, `force_delete` is hidden until the user
+        // ticks `delete_worktree`, so the initial tab order skips it. Ticking
+        // the worktree box reveals the force checkbox, which is covered by
+        // `test_force_checkbox_appears_when_worktree_selected`.
         let mut dialog = full_dialog();
         assert_eq!(dialog.focus, FocusElement::WorktreeCheckbox);
-
-        dialog.handle_key(key(KeyCode::Tab));
-        assert_eq!(dialog.focus, FocusElement::ForceCheckbox);
 
         dialog.handle_key(key(KeyCode::Tab));
         assert_eq!(dialog.focus, FocusElement::BranchCheckbox);
