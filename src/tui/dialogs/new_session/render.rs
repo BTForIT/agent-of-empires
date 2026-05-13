@@ -162,7 +162,7 @@ impl NewSessionDialog {
             "Title:",
             &self.title,
             self.focused_field == title_field,
-            Some("(random civ)"),
+            Some("(folder name)"),
             theme,
         );
         ci += 1;
