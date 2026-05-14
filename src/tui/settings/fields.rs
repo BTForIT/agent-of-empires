@@ -1422,7 +1422,7 @@ fn build_session_fields(
         SettingField {
             key: FieldKey::HostEnvironment,
             label: "Host Environment",
-            description: "Env vars injected into the host command line: KEY=value (literal), KEY=$VAR (passthrough from host), KEY=$$literal (escape a leading $), or bare KEY (passthrough). Profile value replaces the global list. Sandbox sessions use `sandbox.environment` instead.",
+            description: "Env vars injected into the host command line: KEY=value (literal), KEY=$VAR (passthrough from host), KEY=$$literal (escape a leading $), or bare KEY (passthrough). All forms resolve to a literal `KEY=value` arg in the spawned process, visible in `ps`; pick container-side `sandbox.environment` for secrets you want hidden from argv. Profile value replaces the global list.",
             value: FieldValue::List(host_environment),
             category: SettingsCategory::Session,
             has_override: host_env_override,

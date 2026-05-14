@@ -954,20 +954,20 @@ mod tests {
     #[test]
     fn test_environment_override_round_trips() {
         let toml_in = r#"
-            environment = ["CLAUDE_CONFIG_DIR=~/.claude-accounts/work", "GH_TOKEN"]
+            environment = ["CLAUDE_CONFIG_DIR=/home/me/.claude-accounts/work", "GH_TOKEN"]
         "#;
         let config: ProfileConfig = toml::from_str(toml_in).unwrap();
         let env = config.environment.clone().unwrap();
         assert_eq!(
             env,
             vec![
-                "CLAUDE_CONFIG_DIR=~/.claude-accounts/work".to_string(),
+                "CLAUDE_CONFIG_DIR=/home/me/.claude-accounts/work".to_string(),
                 "GH_TOKEN".to_string(),
             ]
         );
 
         let out = toml::to_string_pretty(&config).unwrap();
-        assert!(out.contains("CLAUDE_CONFIG_DIR=~/.claude-accounts/work"));
+        assert!(out.contains("CLAUDE_CONFIG_DIR=/home/me/.claude-accounts/work"));
         assert!(out.contains("GH_TOKEN"));
     }
 

@@ -52,11 +52,10 @@ pub struct Config {
     /// Environment variables injected into the host command line for every
     /// session spawned at global scope. Entries are `KEY=value`, `KEY=$VAR`
     /// (read VAR from the host env), `KEY=$$literal` (escape a `$`), or
-    /// bare `KEY` (passthrough from the host env). A leading `~` in any
-    /// literal value is expanded at spawn time so the TOML stays
-    /// host-portable. Profiles can replace this list via their own
-    /// `environment` field. Sandboxed sessions ignore this list; configure
-    /// `sandbox.environment` instead.
+    /// bare `KEY` (passthrough from the host env). Values are passed through
+    /// verbatim; `~` is not expanded, use an absolute path. Profiles can
+    /// replace this list via their own `environment` field. Sandboxed
+    /// sessions ignore this list; configure `sandbox.environment` instead.
     #[serde(
         default,
         skip_serializing_if = "Vec::is_empty",

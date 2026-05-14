@@ -98,6 +98,29 @@ Both fields are editable from the TUI settings screen and support profile/repo-l
 
 > **Note:** Profile and repo-level overrides fully replace the global value rather than merging with it. A profile that defines `custom_agents` replaces the entire global set, so you must redeclare any global agents you want to keep in that profile.
 
+## Host Environment
+
+```toml
+environment = [
+    "CLAUDE_CONFIG_DIR=/Users/me/.claude-accounts/work",
+    "GH_TOKEN=$AOE_GH_TOKEN",
+    "TERM",
+]
+```
+
+Top-level `environment` injects env vars into the host command line for every session spawned at global scope. Useful for pinning a Claude/Codex/Gemini config dir per profile, forwarding an API token, or otherwise scoping per-agent state without exporting variables shell-wide.
+
+Each entry follows the same grammar as `sandbox.environment`:
+
+- **`KEY=value`** -- literal value, passed through verbatim. `~` is not expanded; use an absolute path.
+- **`KEY=$VAR`** -- read `$VAR` from the host env at spawn time (skipped with a warning if `$VAR` is unset).
+- **`KEY=$$literal`** -- escape; emits `KEY=$literal`.
+- **`KEY`** (bare) -- passthrough from the host env (skipped with a warning if unset).
+
+All forms resolve to a literal `KEY=value` argument on the spawned process and are therefore visible in `ps`. Use `sandbox.environment` instead for secrets you want hidden from argv on a host-side mount.
+
+Profile-scoped `environment` replaces the global list entirely (matching the `sandbox.environment` override semantics). Sandboxed sessions ignore this list; configure `sandbox.environment` for the in-container side.
+
 ## Worktree
 
 ```toml

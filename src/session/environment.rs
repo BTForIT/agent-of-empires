@@ -185,25 +185,6 @@ pub(crate) fn shell_escape(val: &str) -> String {
     format!("'{}'", escaped)
 }
 
-/// Expand a leading `~` or `~/...` to the user's home directory.
-/// Cross-platform via `dirs::home_dir()` (handles `USERPROFILE` on Windows).
-///
-/// Returns the input unchanged when the path does not start with `~`, or
-/// when no home directory is available. Callers that need to know the
-/// expansion failed should check whether the result still starts with `~`.
-pub(crate) fn expand_tilde(path: &str) -> String {
-    if path == "~" {
-        if let Some(home) = dirs::home_dir() {
-            return home.to_string_lossy().to_string();
-        }
-    } else if let Some(rest) = path.strip_prefix("~/") {
-        if let Some(home) = dirs::home_dir() {
-            return home.join(rest).to_string_lossy().to_string();
-        }
-    }
-    path.to_string()
-}
-
 /// Build a shell-ready `KEY='value' KEY2='value2' ` prefix from a list of
 /// environment entries, suitable for prepending to a host command line.
 ///
@@ -708,19 +689,6 @@ environment = ["GH_TOKEN=write_token"]
         let input = "He said \"don't\"";
         let escaped = shell_escape(input);
         assert_eq!(escaped, "'He said \"don'\\''t\"'");
-    }
-
-    #[test]
-    fn test_expand_tilde_passthrough_for_absolute_path() {
-        assert_eq!(expand_tilde("/abs/path"), "/abs/path");
-        assert_eq!(expand_tilde("relative/path"), "relative/path");
-    }
-
-    #[test]
-    fn test_expand_tilde_unrecognized_dollar_prefix_passthrough() {
-        // `$HOME` is intentionally not handled: TOML config paths use `~`,
-        // not shell-style variable references.
-        assert_eq!(expand_tilde("$HOME/foo"), "$HOME/foo");
     }
 
     #[test]
