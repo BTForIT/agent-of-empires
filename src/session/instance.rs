@@ -510,13 +510,11 @@ impl Instance {
         super::config::effective_profile(&self.source_profile)
     }
 
-    /// Resolve the effective profile's `CLAUDE_CONFIG_DIR` override, if
-    /// any. Returns the post-expansion absolute path string (with a
-    /// leading `~` resolved against the runtime environment).
-    fn profile_claude_config_dir(&self) -> Option<String> {
+    /// Resolve the effective `environment` list for this session's profile,
+    /// falling back to the global list when the profile has no override.
+    fn profile_host_environment(&self) -> Vec<String> {
         let profile = self.effective_profile();
-        let pc = super::profile_config::load_profile_config(&profile).ok()?;
-        super::profile_config::resolve_claude_config_dir(&pc)
+        super::profile_config::resolve_config_or_warn(&profile).environment
     }
 
     pub fn is_sub_session(&self) -> bool {
@@ -1120,18 +1118,16 @@ impl Instance {
         // Prepend AOE_INSTANCE_ID env var if this agent supports hooks.
         let mut env_prefix = status_hook_env_prefix(&self.id, &self.tool, agent);
 
-        // Profile-scoped CLAUDE_CONFIG_DIR override. Resolved against the
-        // session's effective profile; a leading `~` in the stored path
-        // is expanded against the runtime environment so the TOML stays
-        // host-portable. Sandboxed sessions intentionally skip this
-        // injection because the override path lives on the host and may
-        // not exist (or may not match) inside the container; sandbox
-        // users should forward the var via `sandbox.environment`
-        // instead.
-        if let Some(dir) = self.profile_claude_config_dir() {
+        // Profile-scoped host environment entries (KEY=value, KEY=$VAR,
+        // KEY=$$literal, or bare KEY for passthrough). Sandboxed sessions
+        // intentionally skip this injection because the entries are
+        // host-side; sandbox users should configure `sandbox.environment`
+        // for the in-container env list.
+        let host_env = self.profile_host_environment();
+        if !host_env.is_empty() {
             env_prefix = format!(
-                "CLAUDE_CONFIG_DIR={} {}",
-                super::environment::shell_escape(&dir),
+                "{}{}",
+                super::environment::host_environment_prefix(&host_env),
                 env_prefix
             );
         }

@@ -44,26 +44,16 @@ pub struct ProfileConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cockpit: Option<CockpitConfigOverride>,
 
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub claude: Option<ClaudeConfigOverride>,
-}
-
-/// Per-profile override for the Claude config dir (i.e. the value passed
-/// as `$CLAUDE_CONFIG_DIR` to spawned Claude sessions). When the override
-/// is `None`, sessions inherit the host shell's `CLAUDE_CONFIG_DIR` (or
-/// fall back to `$HOME/.claude`, which is Claude's own default).
-///
-/// The override is intentionally just a path, not a named-account
-/// abstraction; users layer naming conventions on top however they like
-/// (e.g. a tree of `$HOME/.claude-accounts/<name>` dirs).
-#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
-pub struct ClaudeConfigOverride {
-    /// Directory that becomes `$CLAUDE_CONFIG_DIR` for sessions spawned
-    /// under this profile. A leading `~` is expanded at spawn time so
-    /// TOML files stay portable across hosts. `None` (or an empty
-    /// string serialized as absent) means "inherit shell env".
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub config_dir: Option<String>,
+    /// Per-profile override for the host-side `environment` list. When
+    /// `Some`, replaces the global list entirely (matching the existing
+    /// `sandbox.environment` override semantics). `None` inherits the
+    /// global value. Same entry grammar as `Config.environment`.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "super::serde_helpers::option_string_or_vec"
+    )]
+    pub environment: Option<Vec<String>>,
 }
 
 /// Per-profile overrides for the [cockpit] config section. Every field
@@ -304,33 +294,7 @@ pub fn profile_has_overrides(config: &ProfileConfig) -> bool {
         || config.hooks.is_some()
         || config.sound.is_some()
         || config.cockpit.is_some()
-        || config.claude.is_some()
-}
-
-/// Resolve the effective Claude config directory for a profile. Returns
-/// `None` when the profile has no override (caller should fall back to
-/// the host's `$CLAUDE_CONFIG_DIR` or `~/.claude`). Leading `~` in the
-/// stored path is expanded against the runtime environment so TOML
-/// stays host-portable for the simple case.
-pub fn resolve_claude_config_dir(profile: &ProfileConfig) -> Option<String> {
-    let raw = profile.claude.as_ref()?.config_dir.as_ref()?;
-    let trimmed = raw.trim();
-    if trimmed.is_empty() {
-        return None;
-    }
-    let expanded = super::environment::expand_tilde(trimmed);
-    // `expand_tilde` returns the input unchanged when no home dir is
-    // available. If the user wrote `~/...` and we still have a literal
-    // `~` after expansion, Claude will receive a path it can't resolve;
-    // warn so the spawn failure is diagnosable.
-    if trimmed.starts_with('~') && expanded.starts_with('~') {
-        tracing::warn!(
-            "claude.config_dir is {:?} but no home directory is available; \
-             CLAUDE_CONFIG_DIR will be passed with a literal '~' and Claude will fail to find it",
-            trimmed
-        );
-    }
-    Some(expanded)
+        || config.environment.is_some()
 }
 
 /// Load effective config for a profile (global + profile overrides merged)
@@ -545,13 +509,9 @@ pub fn merge_configs(mut global: Config, profile: &ProfileConfig) -> Config {
         crate::sound::apply_sound_overrides(&mut global.sound, sound_override);
     }
 
-    if let Some(ref claude_override) = profile.claude {
-        if claude_override.config_dir.is_some() {
-            global
-                .claude
-                .get_or_insert_with(super::config::ClaudeConfig::default)
-                .config_dir = claude_override.config_dir.clone();
-        }
+    if let Some(ref environment) = profile.environment {
+        // Replace semantics (matches sandbox.environment override behaviour).
+        global.environment = environment.clone();
     }
 
     if let Some(ref cockpit_override) = profile.cockpit {
@@ -992,100 +952,68 @@ mod tests {
     }
 
     #[test]
-    fn test_claude_override_round_trips() {
+    fn test_environment_override_round_trips() {
         let toml_in = r#"
-            [claude]
-            config_dir = "~/.claude-accounts/work"
+            environment = ["CLAUDE_CONFIG_DIR=~/.claude-accounts/work", "GH_TOKEN"]
         "#;
         let config: ProfileConfig = toml::from_str(toml_in).unwrap();
-        let claude = config.claude.clone().unwrap();
+        let env = config.environment.clone().unwrap();
         assert_eq!(
-            claude.config_dir.as_deref(),
-            Some("~/.claude-accounts/work")
+            env,
+            vec![
+                "CLAUDE_CONFIG_DIR=~/.claude-accounts/work".to_string(),
+                "GH_TOKEN".to_string(),
+            ]
         );
 
         let out = toml::to_string_pretty(&config).unwrap();
-        assert!(out.contains("[claude]"));
-        assert!(out.contains("config_dir = \"~/.claude-accounts/work\""));
+        assert!(out.contains("CLAUDE_CONFIG_DIR=~/.claude-accounts/work"));
+        assert!(out.contains("GH_TOKEN"));
     }
 
     #[test]
-    fn test_claude_override_promotes_profile_has_overrides() {
+    fn test_environment_string_shorthand_deserializes() {
+        // `string_or_vec` lets a single string stand in for a one-element list.
+        let toml_in = r#"environment = "FOO=bar""#;
+        let config: ProfileConfig = toml::from_str(toml_in).unwrap();
+        assert_eq!(config.environment, Some(vec!["FOO=bar".to_string()]));
+    }
+
+    #[test]
+    fn test_environment_override_promotes_profile_has_overrides() {
         let mut profile = ProfileConfig::default();
         assert!(!profile_has_overrides(&profile));
-        profile.claude = Some(ClaudeConfigOverride {
-            config_dir: Some("/tmp/x".to_string()),
-        });
+        profile.environment = Some(vec!["FOO=bar".to_string()]);
         assert!(profile_has_overrides(&profile));
     }
 
     #[test]
-    fn test_merge_configs_promotes_claude_override() {
-        let global = Config::default();
-        assert!(global.claude.is_none());
+    fn test_merge_configs_replaces_global_environment() {
+        let global = Config {
+            environment: vec!["FROM_GLOBAL=1".to_string()],
+            ..Default::default()
+        };
 
         let profile = ProfileConfig {
-            claude: Some(ClaudeConfigOverride {
-                config_dir: Some("/srv/claude-bot".to_string()),
-            }),
+            environment: Some(vec!["FROM_PROFILE=2".to_string()]),
             ..Default::default()
         };
 
         let merged = merge_configs(global, &profile);
-        assert_eq!(
-            merged.claude.and_then(|c| c.config_dir).as_deref(),
-            Some("/srv/claude-bot")
-        );
+        // Profile env replaces (matches sandbox.environment semantics).
+        assert_eq!(merged.environment, vec!["FROM_PROFILE=2".to_string()]);
     }
 
     #[test]
-    fn test_resolve_claude_config_dir_expansion() {
-        let Some(home) = dirs::home_dir() else {
-            return;
+    fn test_merge_configs_inherits_global_environment_when_profile_none() {
+        let global = Config {
+            environment: vec!["FROM_GLOBAL=1".to_string()],
+            ..Default::default()
         };
-        let home_str = home.to_string_lossy().to_string();
 
-        let cases: [(&str, String); 4] = [
-            ("~", home_str.clone()),
-            ("~/foo", home.join("foo").to_string_lossy().to_string()),
-            ("/abs/path", "/abs/path".to_string()),
-            // `$HOME` is intentionally not expanded: TOML config paths use `~`,
-            // not shell-style variable references.
-            ("$HOME/bar", "$HOME/bar".to_string()),
-        ];
+        let profile = ProfileConfig::default();
 
-        for (raw, expected) in cases {
-            let profile = ProfileConfig {
-                claude: Some(ClaudeConfigOverride {
-                    config_dir: Some(raw.to_string()),
-                }),
-                ..Default::default()
-            };
-            assert_eq!(
-                resolve_claude_config_dir(&profile).as_deref(),
-                Some(expected.as_str()),
-                "expansion mismatch for input '{raw}'"
-            );
-        }
-    }
-
-    #[test]
-    fn test_resolve_claude_config_dir_none_paths() {
-        let none_cases = [
-            ProfileConfig::default(),
-            ProfileConfig {
-                claude: Some(ClaudeConfigOverride { config_dir: None }),
-                ..Default::default()
-            },
-            ProfileConfig {
-                claude: Some(ClaudeConfigOverride {
-                    config_dir: Some("   ".to_string()),
-                }),
-                ..Default::default()
-            },
-        ];
-        for p in none_cases {
-            assert!(resolve_claude_config_dir(&p).is_none());
-        }
+        let merged = merge_configs(global, &profile);
+        assert_eq!(merged.environment, vec!["FROM_GLOBAL=1".to_string()]);
     }
 }

@@ -204,6 +204,49 @@ pub(crate) fn expand_tilde(path: &str) -> String {
     path.to_string()
 }
 
+/// Build a shell-ready `KEY='value' KEY2='value2' ` prefix from a list of
+/// environment entries, suitable for prepending to a host command line.
+///
+/// Entry grammar (same as `sandbox.environment`):
+/// - `KEY=value`: literal value. A leading `~` is expanded via `expand_tilde`.
+/// - `KEY=$VAR`: read VAR from the host env at spawn time.
+/// - `KEY=$$literal`: escape; emits `KEY='$literal'`.
+/// - bare `KEY`: passthrough from the host env (skipped with a warning if
+///   the var is not set).
+///
+/// Values are passed through `shell_escape` so spaces, quotes, and shell
+/// metacharacters are preserved literally. Returns an empty string when
+/// the entry list is empty so callers can format unconditionally.
+pub(crate) fn host_environment_prefix(entries: &[String]) -> String {
+    let mut out = String::new();
+    for entry in entries {
+        if let Some((key, value)) = entry.split_once('=') {
+            let resolved = if let Some(rest) = value.strip_prefix("$$") {
+                Some(format!("${}", rest))
+            } else if value.starts_with('$') {
+                match resolve_env_value(value) {
+                    Some(v) => Some(v),
+                    None => continue,
+                }
+            } else {
+                Some(expand_tilde(value))
+            };
+            if let Some(v) = resolved {
+                out.push_str(&format!("{}={} ", key, shell_escape(&v)));
+            }
+        } else {
+            // Bare key: passthrough from host env.
+            match std::env::var(entry) {
+                Ok(v) => out.push_str(&format!("{}={} ", entry, shell_escape(&v))),
+                Err(_) => {
+                    tracing::warn!("host environment variable {} is not set; skipping", entry)
+                }
+            }
+        }
+    }
+    out
+}
+
 /// Resolve an environment value. If the value starts with `$`, read the
 /// named variable from the host environment (use `$$` to escape a literal `$`).
 /// Otherwise return the literal value.
@@ -677,6 +720,67 @@ environment = ["GH_TOKEN=write_token"]
         // `$HOME` is intentionally not handled: TOML config paths use `~`,
         // not shell-style variable references.
         assert_eq!(expand_tilde("$HOME/foo"), "$HOME/foo");
+    }
+
+    #[test]
+    fn test_host_environment_prefix_literal() {
+        let prefix = host_environment_prefix(&["FOO=bar".to_string()]);
+        assert_eq!(prefix, "FOO='bar' ");
+    }
+
+    #[test]
+    fn test_host_environment_prefix_empty() {
+        assert_eq!(host_environment_prefix(&[]), "");
+    }
+
+    #[test]
+    fn test_host_environment_prefix_tilde_expansion() {
+        let Some(home) = dirs::home_dir() else {
+            return;
+        };
+        let prefix = host_environment_prefix(&["DIR=~/sub".to_string()]);
+        let expected = format!("DIR='{}' ", home.join("sub").display());
+        assert_eq!(prefix, expected);
+    }
+
+    #[test]
+    fn test_host_environment_prefix_double_dollar_escape() {
+        // `$$literal` emits a literal `$literal`.
+        let prefix = host_environment_prefix(&["MARKER=$$KEEP".to_string()]);
+        assert_eq!(prefix, "MARKER='$KEEP' ");
+    }
+
+    #[test]
+    fn test_host_environment_prefix_dollar_var_reads_host_env() {
+        std::env::set_var("AOE_TEST_HOST_ENV_PREFIX", "from-host");
+        let prefix = host_environment_prefix(&["FORWARDED=$AOE_TEST_HOST_ENV_PREFIX".to_string()]);
+        std::env::remove_var("AOE_TEST_HOST_ENV_PREFIX");
+        assert_eq!(prefix, "FORWARDED='from-host' ");
+    }
+
+    #[test]
+    fn test_host_environment_prefix_dollar_var_missing_is_skipped() {
+        std::env::remove_var("AOE_TEST_DEFINITELY_NOT_SET");
+        let prefix = host_environment_prefix(&[
+            "MISSING=$AOE_TEST_DEFINITELY_NOT_SET".to_string(),
+            "PRESENT=ok".to_string(),
+        ]);
+        assert_eq!(prefix, "PRESENT='ok' ");
+    }
+
+    #[test]
+    fn test_host_environment_prefix_bare_key_passthrough() {
+        std::env::set_var("AOE_TEST_BARE_PASSTHROUGH", "v");
+        let prefix = host_environment_prefix(&["AOE_TEST_BARE_PASSTHROUGH".to_string()]);
+        std::env::remove_var("AOE_TEST_BARE_PASSTHROUGH");
+        assert_eq!(prefix, "AOE_TEST_BARE_PASSTHROUGH='v' ");
+    }
+
+    #[test]
+    fn test_host_environment_prefix_shell_escapes_metacharacters() {
+        let prefix = host_environment_prefix(&["X=a b'c$d".to_string()]);
+        // Single-quote wrapping with `'\''` escape for the apostrophe.
+        assert_eq!(prefix, "X='a b'\\''c$d' ");
     }
 
     /// Helper to find an entry by key and check its value

@@ -143,7 +143,6 @@ impl SettingsView {
         let categories = vec![
             SettingsCategory::Theme,
             SettingsCategory::Session,
-            SettingsCategory::Claude,
             SettingsCategory::Hooks,
             SettingsCategory::Sandbox,
             SettingsCategory::Worktree,

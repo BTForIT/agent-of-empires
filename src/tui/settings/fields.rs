@@ -24,7 +24,6 @@ pub enum SettingsCategory {
     Hooks,
     Web,
     Cockpit,
-    Claude,
 }
 
 impl SettingsCategory {
@@ -40,7 +39,6 @@ impl SettingsCategory {
             Self::Hooks => "Hooks",
             Self::Web => "Web",
             Self::Cockpit => "Cockpit",
-            Self::Claude => "Claude",
         }
     }
 }
@@ -92,6 +90,7 @@ pub enum FieldKey {
     AgentStatusHooks,
     CustomAgents,
     AgentDetectAs,
+    HostEnvironment,
     // Sound
     SoundEnabled,
     SoundMode,
@@ -124,8 +123,6 @@ pub enum FieldKey {
     CockpitShowToolDurations,
     CockpitQueueDrainMode,
     CockpitMaxConcurrentResumes,
-    // Claude
-    ClaudeConfigDir,
 }
 
 /// Resolve a field value from global config and optional profile override.
@@ -288,37 +285,7 @@ pub fn build_fields_for_category(
         SettingsCategory::Hooks => build_hooks_fields(scope, global, profile),
         SettingsCategory::Web => build_web_fields(scope, global, profile),
         SettingsCategory::Cockpit => build_cockpit_fields(scope, global, profile),
-        SettingsCategory::Claude => build_claude_fields(scope, global, profile),
     }
-}
-
-fn build_claude_fields(
-    scope: SettingsScope,
-    global: &Config,
-    profile: &ProfileConfig,
-) -> Vec<SettingField> {
-    let global_dir = global.claude.as_ref().and_then(|c| c.config_dir.clone());
-    let profile_dir = profile.claude.as_ref().and_then(|c| c.config_dir.clone());
-    let has_explicit_override = profile_dir.is_some();
-    let (config_dir, override_flag) = resolve_optional(
-        scope,
-        global_dir.clone(),
-        profile_dir,
-        has_explicit_override,
-    );
-
-    vec![SettingField {
-        key: FieldKey::ClaudeConfigDir,
-        label: "Config dir",
-        description: "Directory exported as $CLAUDE_CONFIG_DIR when spawning Claude sessions under this profile. A leading `~` is expanded at spawn time so the same TOML works across hosts. Empty (or unset) means inherit the shell's CLAUDE_CONFIG_DIR (or fall back to ~/.claude, Claude's own default). Not injected into sandboxed sessions; use sandbox.environment to forward it inside a container.",
-        value: FieldValue::OptionalText(config_dir),
-        category: SettingsCategory::Claude,
-        has_override: override_flag,
-        inherited_display: inherited_if(
-            override_flag,
-            FieldValue::OptionalText(global_dir),
-        ),
-    }]
 }
 
 fn build_cockpit_fields(
@@ -1236,6 +1203,12 @@ fn build_session_fields(
         session.and_then(|s| s.agent_status_hooks),
     );
 
+    let (host_environment, host_env_override) = resolve_value(
+        scope,
+        global.environment.clone(),
+        profile.environment.clone(),
+    );
+
     // Agent extra args: HashMap -> Vec<String> of "key=value" items for List field
     let (extra_args_map, extra_args_override) = resolve_value(
         scope,
@@ -1444,6 +1417,18 @@ fn build_session_fields(
             inherited_display: inherited_if(
                 status_hooks_override,
                 FieldValue::Bool(global.session.agent_status_hooks),
+            ),
+        },
+        SettingField {
+            key: FieldKey::HostEnvironment,
+            label: "Host Environment",
+            description: "Env vars injected into the host command line: KEY=value (literal, with leading `~` expanded), KEY=$VAR (passthrough from host), KEY=$$literal (escape), or bare KEY (passthrough). Profile value replaces the global list. Sandbox sessions use `sandbox.environment` instead.",
+            value: FieldValue::List(host_environment),
+            category: SettingsCategory::Session,
+            has_override: host_env_override,
+            inherited_display: inherited_if(
+                host_env_override,
+                FieldValue::List(global.environment.clone()),
             ),
         },
     ]
@@ -1894,26 +1879,7 @@ fn apply_field_to_global(field: &SettingField, config: &mut Config) {
         (FieldKey::CockpitMaxConcurrentResumes, FieldValue::Number(v)) => {
             config.cockpit.max_concurrent_resumes = (*v).max(1).min(u32::MAX as u64) as u32
         }
-        // Claude
-        (FieldKey::ClaudeConfigDir, FieldValue::OptionalText(v)) => {
-            let trimmed = v
-                .as_ref()
-                .map(|s| s.trim().to_string())
-                .filter(|s| !s.is_empty());
-            match trimmed {
-                Some(dir) => {
-                    config
-                        .claude
-                        .get_or_insert_with(crate::session::ClaudeConfig::default)
-                        .config_dir = Some(dir);
-                }
-                None => {
-                    if let Some(c) = config.claude.as_mut() {
-                        c.config_dir = None;
-                    }
-                }
-            }
-        }
+        (FieldKey::HostEnvironment, FieldValue::List(v)) => config.environment = v.clone(),
         _ => {}
     }
 }
@@ -2255,26 +2221,10 @@ fn apply_field_to_profile(field: &SettingField, _global: &Config, config: &mut P
                 s.max_concurrent_resumes = val
             });
         }
-        // Claude
-        (FieldKey::ClaudeConfigDir, FieldValue::OptionalText(v)) => {
-            let trimmed = v
-                .as_ref()
-                .map(|s| s.trim().to_string())
-                .filter(|s| !s.is_empty());
-            match trimmed {
-                Some(dir) => {
-                    use crate::session::ClaudeConfigOverride;
-                    let c = config
-                        .claude
-                        .get_or_insert_with(ClaudeConfigOverride::default);
-                    c.config_dir = Some(dir);
-                }
-                None => {
-                    if let Some(c) = config.claude.as_mut() {
-                        c.config_dir = None;
-                    }
-                }
-            }
+        (FieldKey::HostEnvironment, FieldValue::List(v)) => {
+            // Empty list clears the override (no env entries); otherwise store
+            // the list as the profile-scope replacement of the global list.
+            config.environment = if v.is_empty() { None } else { Some(v.clone()) };
         }
         _ => {}
     }
