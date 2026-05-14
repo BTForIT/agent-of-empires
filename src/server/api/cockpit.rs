@@ -66,16 +66,10 @@ pub(crate) fn read_only_block(state: &AppState) -> Option<axum::response::Respon
     None
 }
 
-/// Single chokepoint for cockpit-availability checks. Both gates must
-/// be on for any cockpit-spawning endpoint to succeed:
-///   - `cockpit_master_enabled`: persistent config switch, toggleable
-///     via `PATCH /api/cockpit/master`.
-///   - `experimental_enabled()`: process-scoped `AOE_EXPERIMENTAL_COCKPIT=1`.
-///
-/// Used by `spawn_cockpit`, `cockpit_enable`, and `set_cockpit_master`
-/// so they can't drift out of sync (which previously let
-/// `spawn_cockpit` succeed against an unset env var while
-/// `cockpit_enable` 403'd).
+/// Single chokepoint for cockpit-availability checks. The persistent
+/// master switch (`cockpit.enabled` in config.toml, toggleable via
+/// `PATCH /api/cockpit/master`) must be on for any cockpit-spawning
+/// endpoint to succeed.
 pub(crate) fn cockpit_gate(state: &AppState) -> Result<(), (StatusCode, &'static str)> {
     if !state
         .cockpit_master_enabled
@@ -85,13 +79,6 @@ pub(crate) fn cockpit_gate(state: &AppState) -> Result<(), (StatusCode, &'static
             StatusCode::SERVICE_UNAVAILABLE,
             "cockpit is disabled (config.toml `cockpit.enabled = false`); \
              enable it from the web settings or set the field to true",
-        ));
-    }
-    if !crate::cockpit::experimental_enabled() {
-        return Err((
-            StatusCode::FORBIDDEN,
-            "cockpit is experimental; restart `aoe serve` with \
-             AOE_EXPERIMENTAL_COCKPIT=1 to enable",
         ));
     }
     Ok(())
@@ -659,11 +646,61 @@ pub struct ReplayResponse {
     pub highest_seq: u64,
 }
 
+#[derive(Debug, Deserialize)]
+pub struct ContextPrimerQuery {
+    /// `seq` of the `SessionContextReset` event. The primer only
+    /// includes events with `seq < before_seq` so post-reset noise
+    /// (the reset notice itself, any subsequent prompts) stays out.
+    pub before_seq: u64,
+}
+
+#[derive(Debug, Serialize)]
+pub struct ContextPrimerResponse {
+    /// Rendered markdown primer ready to drop into the composer.
+    /// Empty string when there is no prior transcript to recap.
+    pub primer: String,
+    pub included_event_count: usize,
+    pub included_turn_count: usize,
+    /// True when older turns were dropped or the newest turn was
+    /// truncated within itself to fit the budget. Frontend can surface
+    /// this via a "transcript was abbreviated" hint.
+    pub truncated: bool,
+    pub max_chars: usize,
+}
+
+/// Build a markdown context primer from the persisted cockpit event
+/// log. Used after a `session/load` failure: the agent's model
+/// context is empty, but the visible transcript is intact in SQLite,
+/// so the user can opt in to sending a compact recap as their next
+/// prompt. See #1004.
+pub async fn cockpit_context_primer(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    axum::extract::Query(q): axum::extract::Query<ContextPrimerQuery>,
+) -> impl IntoResponse {
+    let events = state.cockpit_event_store.replay_before(&id, q.before_seq);
+    let primer = crate::cockpit::context_primer::build_context_primer(
+        &events,
+        crate::cockpit::context_primer::PrimerOptions {
+            before_seq: Some(q.before_seq),
+            ..Default::default()
+        },
+    );
+    Json(ContextPrimerResponse {
+        primer: primer.text,
+        included_event_count: primer.included_event_count,
+        included_turn_count: primer.included_turn_count,
+        truncated: primer.truncated,
+        max_chars: primer.max_chars,
+    })
+    .into_response()
+}
+
 /// Reconnect/snapshot endpoint. Mobile clients drop their WebSocket
 /// briefly any time a screen lock fires; this lets them resync without
 /// a full page reload by replaying the buffered frames they missed.
 ///
-/// Gating note: only the standard auth middleware applies — no master-
+/// Gating note: only the standard auth middleware applies, no master-
 /// switch check. History is read-only and contains nothing the live
 /// channel didn't already broadcast, so flipping `cockpit.enabled` off
 /// (which requires a daemon restart and clears the buffers) is the
@@ -712,16 +749,11 @@ pub struct SetMasterRequest {
 #[derive(Debug, Serialize)]
 pub struct MasterStateResponse {
     pub master_enabled: bool,
-    pub env_enabled: bool,
-    pub effective: bool,
 }
 
 /// Toggle `config.cockpit.enabled` from the web UI. Persists to
 /// `config.toml` and updates the live atomic so the reconciler and
 /// gating endpoints pick up the new value without a server restart.
-/// `AOE_EXPERIMENTAL_COCKPIT` is process-scoped and not affected;
-/// it's reported in the response so the UI can explain why cockpit
-/// may still be unavailable after enabling the master switch.
 pub async fn set_cockpit_master(
     State(state): State<Arc<AppState>>,
     Json(req): Json<SetMasterRequest>,
@@ -732,16 +764,6 @@ pub async fn set_cockpit_master(
             Json(serde_json::json!({
                 "error": "read_only",
                 "message": "Server is in read-only mode",
-            })),
-        )
-            .into_response();
-    }
-    if !crate::cockpit::experimental_enabled() {
-        return (
-            StatusCode::FORBIDDEN,
-            Json(serde_json::json!({
-                "error": "experimental_disabled",
-                "message": "cockpit is experimental; restart `aoe serve` with AOE_EXPERIMENTAL_COCKPIT=1 to manage the master switch",
             })),
         )
             .into_response();
@@ -763,18 +785,13 @@ pub async fn set_cockpit_master(
     })
     .await;
     match result {
-        Ok(Ok(())) => {
-            let env_enabled = crate::cockpit::experimental_enabled();
-            (
-                StatusCode::OK,
-                Json(MasterStateResponse {
-                    master_enabled: new_value,
-                    env_enabled,
-                    effective: new_value && env_enabled,
-                }),
-            )
-                .into_response()
-        }
+        Ok(Ok(())) => (
+            StatusCode::OK,
+            Json(MasterStateResponse {
+                master_enabled: new_value,
+            }),
+        )
+            .into_response(),
         Ok(Err(e)) => {
             // Persist failed: roll the atomic back so the live state
             // matches what's actually on disk. A subsequent gating

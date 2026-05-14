@@ -17,6 +17,10 @@ export interface SessionResponse {
   last_error: string | null;
   branch: string | null;
   main_repo_path: string | null;
+  /** Base branch the worktree was created from when AoE managed the
+   *  creation. null for sessions attached to a pre-existing branch or
+   *  those that took the repo's default branch. See #948. */
+  base_branch?: string | null;
   is_sandboxed: boolean;
   has_managed_worktree: boolean;
   has_terminal: boolean;
@@ -31,6 +35,12 @@ export interface SessionResponse {
   /** True when this session uses ACP cockpit rendering instead of a
    *  tmux-backed PTY. Absent on builds without the cockpit feature. */
   cockpit_mode?: boolean;
+  /** Live cockpit worker lifecycle. `absent` for tmux sessions or
+   *  cockpit sessions whose worker has not been spawned yet; `resuming`
+   *  while the reconciler is mid-spawn or mid-attach; `running` once
+   *  the supervisor holds a live worker. Drives the sidebar `Resuming…`
+   *  chip and the per-session banner in the cockpit view. See #1088. */
+  cockpit_worker_state?: CockpitWorkerState;
   /** True when this is a Claude Code session AND the user has enabled
    *  Claude's fullscreen renderer (`tui: "fullscreen"` in
    *  ~/.claude/settings.json). The mobile rendering path uses this to
@@ -45,6 +55,15 @@ export interface SessionResponse {
   /** Latest plan snapshot summarised for the sidebar. Present only on
    *  cockpit sessions whose agent has emitted a Plan. See #1061. */
   plan_summary?: PlanSummary;
+  /** Absolute RFC3339 timestamp at which the agent's pending
+   *  `ScheduleWakeup` fires. Cleared once a fresh user prompt lands
+   *  after the scheduling call. Present only on cockpit sessions
+   *  whose agent has called `ScheduleWakeup` since the last prompt.
+   *  See #1091. */
+  next_wakeup_at?: string;
+  /** Reason the agent provided when scheduling the wakeup. Only set
+   *  when `next_wakeup_at` is also set. */
+  next_wakeup_reason?: string;
 }
 
 export interface PlanSummary {
@@ -121,12 +140,28 @@ export interface RichDiffFile {
     | "conflicted";
   additions: number;
   deletions: number;
+  /** Workspace repo this file belongs to. Omitted for single-repo
+   *  (non-workspace) sessions. The sidebar groups entries by this
+   *  field to disambiguate path collisions across repos. See #1047. */
+  repo_name?: string;
+}
+
+/** One repo's base branch in a (possibly multi-repo) session. */
+export interface RepoBase {
+  /** Omitted for single-repo sessions. */
+  repo_name?: string;
+  base_branch: string;
 }
 
 /** Response from /api/sessions/{id}/diff/files */
 export interface RichDiffFilesResponse {
   files: RichDiffFile[];
-  base_branch: string;
+  /** One entry per repo whose diff was computed. Single-repo sessions
+   *  get a one-element array with `repo_name` omitted; workspace
+   *  sessions get one entry per workspace member with each repo's
+   *  default branch. Replaces the previous top-level `base_branch`
+   *  since workspace members can have different defaults. */
+  per_repo_bases: RepoBase[];
   warning: string | null;
 }
 
@@ -239,6 +274,9 @@ export interface CreateSessionRequest {
   yolo_mode?: boolean;
   worktree_branch?: string;
   create_new_branch?: boolean;
+  /** Branch the new worktree branch is based on (only honored when
+   *  `create_new_branch` is true; empty = repo default). See #948. */
+  base_branch?: string;
   sandbox?: boolean;
   extra_args?: string;
   sandbox_image?: string;
@@ -252,3 +290,7 @@ export interface CreateSessionRequest {
    *  web-created sessions; the wizard may override. */
   cockpit_mode?: boolean;
 }
+
+/** Live cockpit worker lifecycle, mirrored from
+ *  `crate::cockpit::supervisor::CockpitWorkerState`. See #1088. */
+export type CockpitWorkerState = "absent" | "resuming" | "running";

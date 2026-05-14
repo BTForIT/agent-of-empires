@@ -44,8 +44,8 @@ type SidebarItem =
   | { kind: "tab"; id: TabId; label: string }
   | { kind: "divider"; label: string };
 
-function buildSidebar(showCockpit: boolean): SidebarItem[] {
-  const items: SidebarItem[] = [
+function buildSidebar(): SidebarItem[] {
+  return [
     { kind: "divider", label: "General" },
     { kind: "tab", id: "session", label: "Session" },
     { kind: "tab", id: "sandbox", label: "Sandbox" },
@@ -59,11 +59,8 @@ function buildSidebar(showCockpit: boolean): SidebarItem[] {
     { kind: "tab", id: "terminal", label: "Terminal" },
     { kind: "tab", id: "security", label: "Security" },
     { kind: "tab", id: "devices", label: "Devices" },
+    { kind: "tab", id: "cockpit", label: "Cockpit" },
   ];
-  if (showCockpit) {
-    items.push({ kind: "tab", id: "cockpit", label: "Cockpit" });
-  }
-  return items;
 }
 
 interface Props {
@@ -107,14 +104,11 @@ export function SettingsView({
   const [saving, setSaving] = useState(false);
   const [saveError, setSaveError] = useState<string | null>(null);
   const [selectedProfile, setSelectedProfile] = useState("default");
-  const cockpitEnvEnabled = !!serverAbout?.cockpit_env_enabled;
-  const sidebar = buildSidebar(cockpitEnvEnabled);
+  const sidebar = buildSidebar();
   const tabs = sidebar.filter(
     (s): s is { kind: "tab"; id: TabId; label: string } => s.kind === "tab",
   );
-  const requested: TabId = isTabId(tab) ? tab : "session";
-  const activeTab: TabId =
-    requested === "cockpit" && !cockpitEnvEnabled ? "session" : requested;
+  const activeTab: TabId = isTabId(tab) ? tab : "session";
   const [profiles, setProfiles] = useState<ProfileInfo[]>([]);
 
   useEffect(() => {
@@ -578,15 +572,21 @@ function CockpitSettings({
 }) {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const envEnabled = !!serverAbout?.cockpit_env_enabled;
   const masterEnabled = !!serverAbout?.cockpit_master_enabled;
-  const effective = envEnabled && masterEnabled;
   // Local mirror so the toggle reflects optimistically while the
   // backend save + /api/about re-fetch propagate.
   const showToolDurations =
     typeof cockpit.show_tool_durations === "boolean"
       ? (cockpit.show_tool_durations as boolean)
       : (serverAbout?.cockpit_show_tool_durations ?? true);
+  const queueDrainMode: "combined" | "serial" =
+    cockpit.queue_drain_mode === "serial" || cockpit.queue_drain_mode === "combined"
+      ? (cockpit.queue_drain_mode as "combined" | "serial")
+      : (serverAbout?.cockpit_queue_drain_mode ?? "combined");
+  const maxConcurrentResumes =
+    typeof cockpit.max_concurrent_resumes === "number"
+      ? (cockpit.max_concurrent_resumes as number)
+      : (serverAbout?.cockpit_max_concurrent_resumes ?? 4);
 
   const onToggle = async (next: boolean) => {
     setBusy(true);
@@ -605,24 +605,15 @@ function CockpitSettings({
       <div className="rounded border border-surface-700 bg-surface-800/40 p-3 text-xs text-text-dim space-y-1">
         <div>
           <span className="text-text-muted">Status:</span>{" "}
-          {effective ? (
+          {masterEnabled ? (
             <span className="text-emerald-400">Cockpit available for new sessions</span>
           ) : (
-            <span className="text-amber-400">Cockpit unavailable</span>
+            <span className="text-amber-400">Cockpit disabled</span>
           )}
-        </div>
-        <div>
-          <span className="text-text-muted">AOE_EXPERIMENTAL_COCKPIT:</span>{" "}
-          <code className="rounded bg-surface-900 px-1">{envEnabled ? "1" : "(unset)"}</code>
         </div>
         <div>
           <span className="text-text-muted">cockpit.enabled:</span>{" "}
           <code className="rounded bg-surface-900 px-1">{masterEnabled ? "true" : "false"}</code>
-        </div>
-        <div className="text-text-dim pt-1">
-          Both gates must be on. The env var is per-process and only flips by restarting{" "}
-          <code className="rounded bg-surface-900 px-1">aoe serve</code> with{" "}
-          <code className="rounded bg-surface-900 px-1">AOE_EXPERIMENTAL_COCKPIT=1</code>.
         </div>
       </div>
 
@@ -675,6 +666,16 @@ function CockpitSettings({
         />
       </div>
 
+      <div className="border-t border-surface-800 pt-3">
+        <NumberField
+          label="Max concurrent resumes"
+          description="Upper bound on parallel cockpit worker spawns/attaches the reconciler runs on `aoe serve` cold start. Default 4 keeps Node.js bootup memory bounded for laptops/Pis (each claude-agent-acp is ~50-80 MB transient). Bounded at runtime by `min(this, max_concurrent_workers).max(1)`. Persists to config.toml as cockpit.max_concurrent_resumes; cross-device."
+          value={maxConcurrentResumes}
+          min={1}
+          onChange={(v) => onSaveField("cockpit", "max_concurrent_resumes", v)}
+        />
+      </div>
+
       <div className="flex items-start justify-between gap-3 py-1 border-t border-surface-800 pt-3">
         <div>
           <div className="text-sm text-text-bright">Show tool-call durations</div>
@@ -705,6 +706,41 @@ function CockpitSettings({
         >
           {showToolDurations ? "Visible" : "Hidden"}
         </button>
+      </div>
+
+      <div className="flex items-start justify-between gap-3 py-1 border-t border-surface-800 pt-3">
+        <div>
+          <div className="text-sm text-text-bright">Queue drain mode</div>
+          <div className="text-xs text-text-dim mt-0.5">
+            Persists to <code>config.toml</code> as{" "}
+            <code>cockpit.queue_drain_mode</code>; cross-device. Controls how follow-up prompts queued
+            while the agent is busy get dispatched once the current turn ends. <strong>Combined</strong>{" "}
+            (default) joins every queued entry with a blank line and sends them as a single prompt; one
+            response covers the whole batch. <strong>Serial</strong> fires one entry at a time and waits
+            for each response before sending the next.
+          </div>
+        </div>
+        <div className="shrink-0 inline-flex rounded border border-surface-700 bg-surface-900/50 p-0.5 text-xs font-medium">
+          {(["combined", "serial"] as const).map((opt) => (
+            <button
+              key={opt}
+              type="button"
+              aria-pressed={queueDrainMode === opt}
+              onClick={async () => {
+                if (queueDrainMode === opt) return;
+                onSaveField("cockpit", "queue_drain_mode", opt);
+                await onRefresh();
+              }}
+              className={`rounded px-2.5 py-1 transition-colors cursor-pointer ${
+                queueDrainMode === opt
+                  ? "bg-brand-500 text-white"
+                  : "text-text-secondary hover:bg-surface-700"
+              }`}
+            >
+              {opt[0]!.toUpperCase() + opt.slice(1)}
+            </button>
+          ))}
+        </div>
       </div>
 
       {error && <div className="text-xs text-rose-400">{error}</div>}

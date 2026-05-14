@@ -54,6 +54,7 @@ pub enum FieldKey {
     CheckEnabled,
     CheckIntervalHours,
     NotifyInCli,
+    WebPollIntervalMinutes,
     // Worktree
     WorktreeEnabled,
     PathTemplate,
@@ -89,6 +90,7 @@ pub enum FieldKey {
     AgentStatusHooks,
     CustomAgents,
     AgentDetectAs,
+    HostEnvironment,
     // Sound
     SoundEnabled,
     SoundMode,
@@ -107,6 +109,7 @@ pub enum FieldKey {
     WebNotifyOnWaiting,
     WebNotifyOnIdle,
     WebNotifyOnError,
+    WebNotifyOnWakeFire,
     // Cockpit (gated on the `serve` feature; the variants are always
     // present in the enum so external callers don't have to cfg-gate
     // their match arms)
@@ -118,6 +121,8 @@ pub enum FieldKey {
     CockpitReplayBytes,
     CockpitNodePath,
     CockpitShowToolDurations,
+    CockpitQueueDrainMode,
+    CockpitMaxConcurrentResumes,
 }
 
 /// Resolve a field value from global config and optional profile override.
@@ -327,6 +332,16 @@ fn build_cockpit_fields(
         global.cockpit.show_tool_durations,
         p.and_then(|c| c.show_tool_durations),
     );
+    let (queue_drain_mode, qdm_override) = resolve_value(
+        scope,
+        global.cockpit.queue_drain_mode,
+        p.and_then(|c| c.queue_drain_mode),
+    );
+    let (max_concurrent_resumes, mcr_override) = resolve_value(
+        scope,
+        global.cockpit.max_concurrent_resumes,
+        p.and_then(|c| c.max_concurrent_resumes),
+    );
 
     vec![
         SettingField {
@@ -401,6 +416,30 @@ fn build_cockpit_fields(
             has_override: std_override,
             inherited_display: None,
         },
+        SettingField {
+            key: FieldKey::CockpitMaxConcurrentResumes,
+            label: "Max concurrent resumes",
+            description: "Upper bound on parallel cockpit worker spawns/attaches the reconciler runs on `aoe serve` cold start. Default 4 keeps Node.js bootup memory within bounds for laptops/Pis (each claude-agent-acp is ~50-80 MB transient). Bounded at runtime by `min(this, max_concurrent_workers).max(1)`. See #1088.",
+            value: FieldValue::Number(u64::from(max_concurrent_resumes)),
+            category: SettingsCategory::Cockpit,
+            has_override: mcr_override,
+            inherited_display: None,
+        },
+        SettingField {
+            key: FieldKey::CockpitQueueDrainMode,
+            label: "Queue drain mode",
+            description: "How the web composer dispatches follow-up prompts queued while the agent was busy. Combined (default) joins every queued entry with a blank line and sends them as a single prompt on the next Stopped; one response covers the whole batch. Serial fires one entry at a time; each gets its own response. See #1031.",
+            value: FieldValue::Select {
+                selected: match queue_drain_mode {
+                    crate::session::config::QueueDrainMode::Combined => 0,
+                    crate::session::config::QueueDrainMode::Serial => 1,
+                },
+                options: vec!["combined".to_string(), "serial".to_string()],
+            },
+            category: SettingsCategory::Cockpit,
+            has_override: qdm_override,
+            inherited_display: None,
+        },
     ]
 }
 
@@ -447,6 +486,15 @@ fn build_web_fields(
             label: "Notify on error",
             description: "Default: send a push when a session errors (Running to Error).",
             value: FieldValue::Bool(global.web.notify_on_error),
+            category: SettingsCategory::Web,
+            has_override: false,
+            inherited_display: None,
+        },
+        SettingField {
+            key: FieldKey::WebNotifyOnWakeFire,
+            label: "Notify on scheduled wake",
+            description: "Default: send a push when a cockpit session's ScheduleWakeup timer fires (the next /loop turn starts). Suppressed if the TUI or web dashboard has been active in the last 30s.",
+            value: FieldValue::Bool(global.web.notify_on_wake_fire),
             category: SettingsCategory::Web,
             has_override: false,
             inherited_display: None,
@@ -569,6 +617,11 @@ fn build_updates_fields(
         global.updates.notify_in_cli,
         updates.and_then(|u| u.notify_in_cli),
     );
+    let (web_poll, o4) = resolve_value(
+        scope,
+        global.updates.web_poll_interval_minutes,
+        updates.and_then(|u| u.web_poll_interval_minutes),
+    );
 
     vec![
         SettingField {
@@ -600,6 +653,18 @@ fn build_updates_fields(
             category: SettingsCategory::Updates,
             has_override: o3,
             inherited_display: inherited_if(o3, FieldValue::Bool(global.updates.notify_in_cli)),
+        },
+        SettingField {
+            key: FieldKey::WebPollIntervalMinutes,
+            label: "Web Poll Interval (minutes)",
+            description: "How often the web dashboard re-polls for new releases",
+            value: FieldValue::Number(web_poll),
+            category: SettingsCategory::Updates,
+            has_override: o4,
+            inherited_display: inherited_if(
+                o4,
+                FieldValue::Number(global.updates.web_poll_interval_minutes),
+            ),
         },
     ]
 }
@@ -850,8 +915,8 @@ fn build_sandbox_fields(
         },
         SettingField {
             key: FieldKey::Environment,
-            label: "Environment",
-            description: "Env vars: bare KEY passes host value, KEY=VALUE sets explicitly",
+            label: "Sandbox Environment",
+            description: "Env vars injected into the container: KEY=value (literal, appears in argv), KEY=$VAR (passthrough from host, hidden from argv), KEY=$$literal (escape a leading $), or bare KEY (passthrough). For host (non-sandboxed) sessions, see Session > Host Environment instead.",
             value: FieldValue::List(environment),
             category: SettingsCategory::Sandbox,
             has_override: o4,
@@ -1138,6 +1203,12 @@ fn build_session_fields(
         session.and_then(|s| s.agent_status_hooks),
     );
 
+    let (host_environment, host_env_override) = resolve_value(
+        scope,
+        global.environment.clone(),
+        profile.environment.clone(),
+    );
+
     // Agent extra args: HashMap -> Vec<String> of "key=value" items for List field
     let (extra_args_map, extra_args_override) = resolve_value(
         scope,
@@ -1346,6 +1417,18 @@ fn build_session_fields(
             inherited_display: inherited_if(
                 status_hooks_override,
                 FieldValue::Bool(global.session.agent_status_hooks),
+            ),
+        },
+        SettingField {
+            key: FieldKey::HostEnvironment,
+            label: "Host Environment",
+            description: "Env vars injected into the host command line: KEY=value (literal), KEY=$VAR (passthrough from host), KEY=$$literal (escape a leading $), or bare KEY (passthrough). All forms resolve to a literal `KEY=value` arg in the spawned process, visible in `ps`; for secrets you want hidden from argv, configure Sandbox > Sandbox Environment instead. Profile value replaces the global list.",
+            value: FieldValue::List(host_environment),
+            category: SettingsCategory::Session,
+            has_override: host_env_override,
+            inherited_display: inherited_if(
+                host_env_override,
+                FieldValue::List(global.environment.clone()),
             ),
         },
     ]
@@ -1621,6 +1704,9 @@ fn apply_field_to_global(field: &SettingField, config: &mut Config) {
             config.updates.check_interval_hours = *v
         }
         (FieldKey::NotifyInCli, FieldValue::Bool(v)) => config.updates.notify_in_cli = *v,
+        (FieldKey::WebPollIntervalMinutes, FieldValue::Number(v)) => {
+            config.updates.web_poll_interval_minutes = *v
+        }
         // Worktree
         (FieldKey::WorktreeEnabled, FieldValue::Bool(v)) => config.worktree.enabled = *v,
         (FieldKey::PathTemplate, FieldValue::Text(v)) => config.worktree.path_template = v.clone(),
@@ -1754,6 +1840,9 @@ fn apply_field_to_global(field: &SettingField, config: &mut Config) {
         (FieldKey::WebNotifyOnIdle, FieldValue::Bool(v)) => {
             config.web.notify_on_idle = *v;
         }
+        (FieldKey::WebNotifyOnWakeFire, FieldValue::Bool(v)) => {
+            config.web.notify_on_wake_fire = *v;
+        }
         (FieldKey::WebNotifyOnError, FieldValue::Bool(v)) => {
             config.web.notify_on_error = *v;
         }
@@ -1780,6 +1869,17 @@ fn apply_field_to_global(field: &SettingField, config: &mut Config) {
         (FieldKey::CockpitShowToolDurations, FieldValue::Bool(v)) => {
             config.cockpit.show_tool_durations = *v
         }
+        (FieldKey::CockpitQueueDrainMode, FieldValue::Select { selected, options }) => {
+            if let Some(name) = options.get(*selected) {
+                if let Some(mode) = crate::session::config::QueueDrainMode::parse(name) {
+                    config.cockpit.queue_drain_mode = mode;
+                }
+            }
+        }
+        (FieldKey::CockpitMaxConcurrentResumes, FieldValue::Number(v)) => {
+            config.cockpit.max_concurrent_resumes = (*v).max(1).min(u32::MAX as u64) as u32
+        }
+        (FieldKey::HostEnvironment, FieldValue::List(v)) => config.environment = v.clone(),
         _ => {}
     }
 }
@@ -1825,6 +1925,11 @@ fn apply_field_to_profile(field: &SettingField, _global: &Config, config: &mut P
         }
         (FieldKey::NotifyInCli, FieldValue::Bool(v)) => {
             set_profile_override(*v, &mut config.updates, |s, val| s.notify_in_cli = val);
+        }
+        (FieldKey::WebPollIntervalMinutes, FieldValue::Number(v)) => {
+            set_profile_override(*v, &mut config.updates, |s, val| {
+                s.web_poll_interval_minutes = val
+            });
         }
         // Worktree
         (FieldKey::WorktreeEnabled, FieldValue::Bool(v)) => {
@@ -2100,6 +2205,26 @@ fn apply_field_to_profile(field: &SettingField, _global: &Config, config: &mut P
             set_profile_override(*v, &mut config.cockpit, |s, val| {
                 s.show_tool_durations = val
             });
+        }
+        (FieldKey::CockpitQueueDrainMode, FieldValue::Select { selected, options }) => {
+            if let Some(name) = options.get(*selected) {
+                if let Some(mode) = crate::session::config::QueueDrainMode::parse(name) {
+                    set_profile_override(mode, &mut config.cockpit, |s, val| {
+                        s.queue_drain_mode = val
+                    });
+                }
+            }
+        }
+        (FieldKey::CockpitMaxConcurrentResumes, FieldValue::Number(v)) => {
+            let clamped = (*v).max(1).min(u32::MAX as u64) as u32;
+            set_profile_override(clamped, &mut config.cockpit, |s, val| {
+                s.max_concurrent_resumes = val
+            });
+        }
+        (FieldKey::HostEnvironment, FieldValue::List(v)) => {
+            // Empty list clears the override (no env entries); otherwise store
+            // the list as the profile-scope replacement of the global list.
+            config.environment = if v.is_empty() { None } else { Some(v.clone()) };
         }
         _ => {}
     }

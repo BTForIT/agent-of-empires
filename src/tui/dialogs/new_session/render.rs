@@ -109,9 +109,10 @@ impl NewSessionDialog {
         // Render fields sequentially, tracking chunk index to match dynamic constraints
         let mut ci = 0; // chunk index
 
-        // Field index calculations (must match handle_key)
+        // Field index calculations (must match handle_key).
+        // Field order: [profile], path, title, [tool], ...
         let base = if has_profile_selection { 1 } else { 0 };
-        let title_field = base;
+        let title_field = base + 1;
         let mut fi = base + 2 + if has_tool_selection { 1 } else { 0 };
         let yolo_mode_field = if has_yolo {
             let f = fi;
@@ -142,6 +143,16 @@ impl NewSessionDialog {
             ci += 1;
         }
 
+        // Path (rendered first so the user picks the working directory
+        // before naming the session).
+        let path_placeholder = if self.focused_field == self.path_field() {
+            Some("(Ctrl+P to browse directories)")
+        } else {
+            None
+        };
+        self.render_path_field(frame, chunks[ci], path_placeholder, theme);
+        ci += 1;
+
         // Title
         render_text_field(
             frame,
@@ -152,15 +163,6 @@ impl NewSessionDialog {
             Some("(random civ)"),
             theme,
         );
-        ci += 1;
-
-        // Path
-        let path_placeholder = if self.focused_field == self.path_field() {
-            Some("(Ctrl+P to browse directories)")
-        } else {
-            None
-        };
-        self.render_path_field(frame, chunks[ci], path_placeholder, theme);
         ci += 1;
 
         // Tool (always shown, interactive or read-only)
@@ -433,9 +435,9 @@ impl NewSessionDialog {
                 }
                 hint_spans.push(Span::styled("C-←/M-b", Style::default().fg(theme.hint)));
                 hint_spans.push(Span::raw(" prev seg  "));
-                hint_spans.push(Span::styled("Home/C-a", Style::default().fg(theme.hint)));
+                hint_spans.push(Span::styled("Home/Ctrl+A", Style::default().fg(theme.hint)));
                 hint_spans.push(Span::raw(" start  "));
-                hint_spans.push(Span::styled("C-p", Style::default().fg(theme.hint)));
+                hint_spans.push(Span::styled("Ctrl+P", Style::default().fg(theme.hint)));
                 hint_spans.push(Span::raw(" browse  "));
             }
             if self.focused_field == group_field && !self.existing_groups.is_empty() {
@@ -443,15 +445,15 @@ impl NewSessionDialog {
                     hint_spans.push(Span::styled("→", Style::default().fg(theme.hint)));
                     hint_spans.push(Span::raw(" accept  "));
                 }
-                hint_spans.push(Span::styled("C-p", Style::default().fg(theme.hint)));
+                hint_spans.push(Span::styled("Ctrl+P", Style::default().fg(theme.hint)));
                 hint_spans.push(Span::raw(" groups  "));
             }
             if self.focused_field == tool_field {
-                hint_spans.push(Span::styled("C-p", Style::default().fg(theme.hint)));
+                hint_spans.push(Span::styled("Ctrl+P", Style::default().fg(theme.hint)));
                 hint_spans.push(Span::raw(" configure  "));
             }
             if self.focused_field == worktree_field && self.worktree_enabled {
-                hint_spans.push(Span::styled("C-p", Style::default().fg(theme.hint)));
+                hint_spans.push(Span::styled("Ctrl+P", Style::default().fg(theme.hint)));
                 hint_spans.push(Span::raw(" configure  "));
             }
             hint_spans.push(Span::styled("Enter", Style::default().fg(theme.hint)));
@@ -781,6 +783,7 @@ impl NewSessionDialog {
         let constraints = vec![
             Constraint::Length(2),            // Name
             Constraint::Length(2),            // New Branch checkbox
+            Constraint::Length(2),            // Base Branch
             Constraint::Length(repos_height), // Extra Repos
             Constraint::Min(1),               // Hints
         ];
@@ -861,11 +864,30 @@ impl NewSessionDialog {
             frame.render_widget(Paragraph::new(line), chunks[1]);
         }
 
+        // Base Branch (only meaningful when "new branch" is checked; when
+        // unchecked we render the field dimmed so the layout stays stable).
+        {
+            let placeholder = if self.create_new_branch {
+                "(empty = repo default)"
+            } else {
+                "(ignored: attaching to existing)"
+            };
+            render_text_field(
+                frame,
+                chunks[2],
+                "Base:",
+                &self.base_branch,
+                self.worktree_config_focused_field == 2,
+                Some(placeholder),
+                theme,
+            );
+        }
+
         // Extra Repos
         self.render_extra_repos_field(
             frame,
-            chunks[2],
-            self.worktree_config_focused_field == 2,
+            chunks[3],
+            self.worktree_config_focused_field == 3,
             theme,
         );
 
@@ -875,26 +897,26 @@ impl NewSessionDialog {
             Span::raw(" next  "),
             Span::styled("Space", Style::default().fg(theme.hint)),
             Span::raw(" toggle  "),
-            Span::styled("C-p", Style::default().fg(theme.hint)),
+            Span::styled("Ctrl+P", Style::default().fg(theme.hint)),
             Span::raw(" branches  "),
             Span::styled("Enter", Style::default().fg(theme.hint)),
             Span::raw(" done  "),
             Span::styled("Esc", Style::default().fg(theme.hint)),
             Span::raw(" back"),
         ];
-        if self.worktree_config_focused_field == 2 && !self.workspace_repos_expanded {
+        if self.worktree_config_focused_field == 3 && !self.workspace_repos_expanded {
             hint_spans = vec![
                 Span::styled("Tab", Style::default().fg(theme.hint)),
                 Span::raw(" next  "),
                 Span::styled("Enter", Style::default().fg(theme.hint)),
                 Span::raw(" edit repos  "),
-                Span::styled("C-r", Style::default().fg(theme.hint)),
+                Span::styled("Ctrl+R", Style::default().fg(theme.hint)),
                 Span::raw(" pick project  "),
                 Span::styled("Esc", Style::default().fg(theme.hint)),
                 Span::raw(" back"),
             ];
         }
-        frame.render_widget(Paragraph::new(Line::from(hint_spans)), chunks[3]);
+        frame.render_widget(Paragraph::new(Line::from(hint_spans)), chunks[4]);
 
         if self.show_help {
             self.render_help_overlay(frame, area, theme);

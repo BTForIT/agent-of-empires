@@ -43,6 +43,17 @@ pub struct ProfileConfig {
 
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cockpit: Option<CockpitConfigOverride>,
+
+    /// Per-profile override for the host-side `environment` list. When
+    /// `Some`, replaces the global list entirely (matching the existing
+    /// `sandbox.environment` override semantics). `None` inherits the
+    /// global value. Same entry grammar as `Config.environment`.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "super::serde_helpers::option_string_or_vec"
+    )]
+    pub environment: Option<Vec<String>>,
 }
 
 /// Per-profile overrides for the [cockpit] config section. Every field
@@ -66,6 +77,10 @@ pub struct CockpitConfigOverride {
     pub node_path: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub show_tool_durations: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub queue_drain_mode: Option<crate::session::config::QueueDrainMode>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_concurrent_resumes: Option<u32>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -88,6 +103,9 @@ pub struct UpdatesConfigOverride {
 
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub notify_in_cli: Option<bool>,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub web_poll_interval_minutes: Option<u64>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -275,6 +293,8 @@ pub fn profile_has_overrides(config: &ProfileConfig) -> bool {
         || config.session.is_some()
         || config.hooks.is_some()
         || config.sound.is_some()
+        || config.cockpit.is_some()
+        || config.environment.is_some()
 }
 
 /// Load effective config for a profile (global + profile overrides merged)
@@ -460,6 +480,9 @@ pub fn merge_configs(mut global: Config, profile: &ProfileConfig) -> Config {
         if let Some(notify_in_cli) = updates_override.notify_in_cli {
             global.updates.notify_in_cli = notify_in_cli;
         }
+        if let Some(web_poll_interval_minutes) = updates_override.web_poll_interval_minutes {
+            global.updates.web_poll_interval_minutes = web_poll_interval_minutes;
+        }
     }
 
     if let Some(ref worktree_override) = profile.worktree {
@@ -486,6 +509,11 @@ pub fn merge_configs(mut global: Config, profile: &ProfileConfig) -> Config {
         crate::sound::apply_sound_overrides(&mut global.sound, sound_override);
     }
 
+    if let Some(ref environment) = profile.environment {
+        // Replace semantics (matches sandbox.environment override behaviour).
+        global.environment = environment.clone();
+    }
+
     if let Some(ref cockpit_override) = profile.cockpit {
         if let Some(v) = cockpit_override.enabled {
             global.cockpit.enabled = v;
@@ -510,6 +538,12 @@ pub fn merge_configs(mut global: Config, profile: &ProfileConfig) -> Config {
         }
         if let Some(v) = cockpit_override.show_tool_durations {
             global.cockpit.show_tool_durations = v;
+        }
+        if let Some(v) = cockpit_override.queue_drain_mode {
+            global.cockpit.queue_drain_mode = v;
+        }
+        if let Some(v) = cockpit_override.max_concurrent_resumes {
+            global.cockpit.max_concurrent_resumes = v;
         }
     }
 
@@ -915,5 +949,71 @@ mod tests {
         let hooks = config.hooks.unwrap();
         assert_eq!(hooks.on_create, Some(vec!["npm install".to_string()]));
         assert_eq!(hooks.on_launch, Some(vec!["npm start".to_string()]));
+    }
+
+    #[test]
+    fn test_environment_override_round_trips() {
+        let toml_in = r#"
+            environment = ["CLAUDE_CONFIG_DIR=/home/me/.claude-accounts/work", "GH_TOKEN"]
+        "#;
+        let config: ProfileConfig = toml::from_str(toml_in).unwrap();
+        let env = config.environment.clone().unwrap();
+        assert_eq!(
+            env,
+            vec![
+                "CLAUDE_CONFIG_DIR=/home/me/.claude-accounts/work".to_string(),
+                "GH_TOKEN".to_string(),
+            ]
+        );
+
+        let out = toml::to_string_pretty(&config).unwrap();
+        assert!(out.contains("CLAUDE_CONFIG_DIR=/home/me/.claude-accounts/work"));
+        assert!(out.contains("GH_TOKEN"));
+    }
+
+    #[test]
+    fn test_environment_string_shorthand_deserializes() {
+        // `string_or_vec` lets a single string stand in for a one-element list.
+        let toml_in = r#"environment = "FOO=bar""#;
+        let config: ProfileConfig = toml::from_str(toml_in).unwrap();
+        assert_eq!(config.environment, Some(vec!["FOO=bar".to_string()]));
+    }
+
+    #[test]
+    fn test_environment_override_promotes_profile_has_overrides() {
+        let mut profile = ProfileConfig::default();
+        assert!(!profile_has_overrides(&profile));
+        profile.environment = Some(vec!["FOO=bar".to_string()]);
+        assert!(profile_has_overrides(&profile));
+    }
+
+    #[test]
+    fn test_merge_configs_replaces_global_environment() {
+        let global = Config {
+            environment: vec!["FROM_GLOBAL=1".to_string()],
+            ..Default::default()
+        };
+
+        let profile = ProfileConfig {
+            environment: Some(vec!["FROM_PROFILE=2".to_string()]),
+            ..Default::default()
+        };
+
+        let merged = merge_configs(global, &profile);
+        // Profile env replaces (matches sandbox.environment semantics).
+        assert_eq!(merged.environment, vec!["FROM_PROFILE=2".to_string()]);
+    }
+
+    #[test]
+    fn test_merge_configs_inherits_global_environment_when_profile_none() {
+        let global = Config {
+            environment: vec!["FROM_GLOBAL=1".to_string()],
+            ..Default::default()
+        };
+
+        let profile = ProfileConfig::default();
+
+        let merged = merge_configs(global, &profile);
+        assert_eq!(merged.environment, vec!["FROM_GLOBAL=1".to_string()]);
     }
 }

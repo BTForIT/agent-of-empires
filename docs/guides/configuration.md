@@ -44,12 +44,12 @@ All settings below can also be edited from the TUI settings screen (press `s` or
 
 ```toml
 [theme]
-name = "empire"   # empire, phosphor, tokyo-night-storm, catppuccin-latte, dracula
+name = "empire"   # empire, phosphor, tokyo-night-storm, catppuccin-latte, dracula, rose-pine
 ```
 
 | Option | Default | Description |
 |--------|---------|-------------|
-| `name` | `"empire"` | TUI color theme. Available: `empire` (warm navy/amber), `phosphor` (green), `tokyo-night-storm` (dark blue/purple), `catppuccin-latte` (light pastel), `dracula` (dark purple/pink). |
+| `name` | `"empire"` | TUI color theme. Available: `empire` (warm navy/amber), `phosphor` (green), `tokyo-night-storm` (dark blue/purple), `catppuccin-latte` (light pastel), `dracula` (dark purple/pink), `rose-pine` (dark muted purple/pink). |
 
 ## Session
 
@@ -97,6 +97,29 @@ agent_detect_as = { "lenovo-claude" = "claude" }
 Both fields are editable from the TUI settings screen and support profile/repo-level overrides.
 
 > **Note:** Profile and repo-level overrides fully replace the global value rather than merging with it. A profile that defines `custom_agents` replaces the entire global set, so you must redeclare any global agents you want to keep in that profile.
+
+## Host Environment
+
+```toml
+environment = [
+    "CLAUDE_CONFIG_DIR=/Users/me/.claude-accounts/work",
+    "GH_TOKEN=$AOE_GH_TOKEN",
+    "TERM",
+]
+```
+
+Top-level `environment` injects env vars into the host command line for every session spawned at global scope. Useful for pinning a Claude/Codex/Gemini config dir per profile, forwarding an API token, or otherwise scoping per-agent state without exporting variables shell-wide.
+
+Each entry follows the same grammar as `sandbox.environment`:
+
+- **`KEY=value`** -- literal value, passed through verbatim. `~` is not expanded; use an absolute path.
+- **`KEY=$VAR`** -- read `$VAR` from the host env at spawn time (skipped with a warning if `$VAR` is unset).
+- **`KEY=$$literal`** -- escape; emits `KEY=$literal`.
+- **`KEY`** (bare) -- passthrough from the host env (skipped with a warning if unset).
+
+All forms resolve to a literal `KEY=value` argument on the spawned process and are therefore visible in `ps`. For secrets you want hidden from argv, use [`sandbox.environment`](#sandbox-docker) instead. Host and sandbox sessions take disjoint code paths: a sandboxed session reads only `sandbox.environment`, an unsandboxed session reads only the top-level `environment`. Set both lists if you want a variable available regardless of how the session launches.
+
+Profile-scoped `environment` replaces the global list entirely (matching the `sandbox.environment` override semantics).
 
 ## Worktree
 
@@ -164,6 +187,8 @@ Each entry in the `environment` list can be:
 - **`KEY`** (bare name) -- passes the host env var value into the container
 - **`KEY=VALUE`** -- sets an explicit value; if VALUE starts with `$`, it reads from a host env var (e.g., `GH_TOKEN=$AOE_GH_TOKEN`). Use `$$` for a literal `$`.
 
+Bare `KEY` and `KEY=$VAR` entries use Docker's `-e KEY` (key-only) form so the value stays out of argv. For env vars on **host (non-sandboxed) sessions**, see [Host Environment](#host-environment) instead. The two lists live on disjoint code paths: a sandboxed session reads only `sandbox.environment`, an unsandboxed session reads only top-level `environment`.
+
 ## tmux
 
 ```toml
@@ -200,14 +225,16 @@ check_enabled = true
 auto_update = false
 check_interval_hours = 24
 notify_in_cli = true
+web_poll_interval_minutes = 60
 ```
 
 | Option | Default | Description |
 |--------|---------|-------------|
-| `check_enabled` | `true` | Check for new versions |
+| `check_enabled` | `true` | Check for new versions; also gates the web dashboard's update banner |
 | `auto_update` | `false` | Automatically install updates |
-| `check_interval_hours` | `24` | Hours between update checks |
+| `check_interval_hours` | `24` | Hours between GitHub checks (server-side cache TTL) |
 | `notify_in_cli` | `true` | Show update notifications in CLI output |
+| `web_poll_interval_minutes` | `60` | How often the web dashboard re-polls `/api/system/update-status` while open (min 5) |
 
 ## Profiles
 

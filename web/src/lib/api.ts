@@ -94,9 +94,12 @@ export function getSessionDiffFiles(
 export function getSessionFileDiff(
   id: string,
   filePath: string,
+  repoName?: string,
 ): Promise<RichFileDiffResponse | null> {
+  const params = new URLSearchParams({ path: filePath });
+  if (repoName) params.set("repo", repoName);
   return fetchJson<RichFileDiffResponse>(
-    `/api/sessions/${id}/diff/file?path=${encodeURIComponent(filePath)}`,
+    `/api/sessions/${id}/diff/file?${params.toString()}`,
   );
 }
 
@@ -233,25 +236,31 @@ export interface ServerAbout {
   read_only: boolean;
   behind_tunnel: boolean;
   profile: string;
-  /** True when cockpit is available for new sessions (master switch
-   *  is on AND AOE_EXPERIMENTAL_COCKPIT=1 is set). When false, every
-   *  new session is tmux. */
-  experimental_cockpit: boolean;
   /** Live value of the cockpit master switch (`config.cockpit.enabled`).
-   *  Toggleable from the web settings via PATCH /api/cockpit/master. */
+   *  Toggleable from the web settings via PATCH /api/cockpit/master.
+   *  When true, new sessions for ACP-capable tools default to cockpit
+   *  mode; when false, every new session is tmux. */
   cockpit_master_enabled: boolean;
-  /** Whether the server process has AOE_EXPERIMENTAL_COCKPIT=1 set.
-   *  Read-only; flipping requires restarting `aoe serve`. */
-  cockpit_env_enabled: boolean;
   /** Resolved `cockpit.show_tool_durations` from the active profile's
    *  config. Drives the per-tool elapsed-time label in the cockpit
    *  web UI; cross-device since it lives in config.toml. */
   cockpit_show_tool_durations: boolean;
+  /** Resolved `cockpit.queue_drain_mode` from the active profile's
+   *  config. Selects how the composer drains client-side queued
+   *  follow-up prompts on Stopped: `combined` (default) joins them
+   *  with blank lines into a single prompt; `serial` fires one entry
+   *  at a time. See #1031. */
+  cockpit_queue_drain_mode: "combined" | "serial";
+  /** Resolved `cockpit.max_concurrent_resumes` from the active
+   *  profile's config. Upper bound on parallel cockpit worker
+   *  spawns/attaches the reconciler runs on `aoe serve` cold start.
+   *  See #1088. */
+  cockpit_max_concurrent_resumes: number;
 }
 
 export async function setCockpitMaster(
   enabled: boolean,
-): Promise<{ master_enabled: boolean; env_enabled: boolean; effective: boolean } | null> {
+): Promise<{ master_enabled: boolean } | null> {
   try {
     const res = await fetch("/api/cockpit/master", {
       method: "PATCH",
@@ -267,6 +276,67 @@ export async function setCockpitMaster(
 
 export function fetchAbout(): Promise<ServerAbout | null> {
   return fetchJson<ServerAbout>("/api/about");
+}
+
+export interface UpdateStatus {
+  check_enabled: boolean;
+  current_version: string;
+  latest_version: string | null;
+  update_available: boolean;
+  release_url: string | null;
+  web_poll_interval_minutes: number;
+  error: string | null;
+}
+
+export function fetchUpdateStatus(): Promise<UpdateStatus | null> {
+  return fetchJson<UpdateStatus>("/api/system/update-status");
+}
+
+// --- Branches ---
+
+export interface BranchInfo {
+  name: string;
+  is_current: boolean;
+  remote_only?: boolean;
+}
+
+/** Lists branches for a repo path. When `includeRemote` is true the
+ *  response includes branches that only exist on the remote (with
+ *  `remote_only: true`); selecting one bases the new worktree off the
+ *  remote tip. See #948. */
+export function fetchBranches(
+  path: string,
+  includeRemote = false,
+): Promise<BranchInfo[] | null> {
+  const params = new URLSearchParams({ path });
+  if (includeRemote) params.set("include_remote", "true");
+  return fetchJson<BranchInfo[]>(`/api/git/branches?${params.toString()}`);
+}
+
+// --- Cockpit context primer ---
+
+export interface ContextPrimerResponse {
+  primer: string;
+  included_event_count: number;
+  included_turn_count: number;
+  truncated: boolean;
+  max_chars: number;
+}
+
+/** Fetch a markdown primer built from events `seq < beforeSeq`. Used
+ *  after a `session/load` failure: the agent's model context is empty
+ *  but the transcript is intact in SQLite, so the user can opt in to
+ *  pre-filling the composer with a compact recap. See #1004. */
+export function fetchContextPrimer(
+  sessionId: string,
+  beforeSeq: number,
+  signal?: AbortSignal,
+): Promise<ContextPrimerResponse | null> {
+  const params = new URLSearchParams({ before_seq: String(beforeSeq) });
+  return fetchJson<ContextPrimerResponse>(
+    `/api/sessions/${encodeURIComponent(sessionId)}/cockpit/context-primer?${params.toString()}`,
+    signal ? { signal } : undefined,
+  );
 }
 
 // --- Devices ---

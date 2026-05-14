@@ -385,23 +385,27 @@ pub struct ServerAbout {
     pub read_only: bool,
     pub behind_tunnel: bool,
     pub profile: String,
-    /// True when `AOE_EXPERIMENTAL_COCKPIT=1` is set on the server
-    /// process AND the master switch (`cockpit.enabled`) is on. The
-    /// wizard uses this to decide whether new sessions auto-route
-    /// through cockpit; when false, every new session is tmux.
-    pub experimental_cockpit: bool,
     /// Live value of the `cockpit.enabled` master switch. The settings
     /// UI binds its toggle to this and updates it via
-    /// `PATCH /api/cockpit/master`.
+    /// `PATCH /api/cockpit/master`. When true, new sessions for ACP-
+    /// capable tools default to cockpit mode; when false, every new
+    /// session is tmux.
     pub cockpit_master_enabled: bool,
-    /// Whether the server process has `AOE_EXPERIMENTAL_COCKPIT=1` set.
-    /// Read-only from the web; flipping requires restarting `aoe serve`
-    /// with the env var set.
-    pub cockpit_env_enabled: bool,
     /// Resolved value of `cockpit.show_tool_durations` from the active
     /// profile's config. Drives the per-tool elapsed-time label in the
     /// web UI; cross-device since it lives in config.toml.
     pub cockpit_show_tool_durations: bool,
+    /// Resolved value of `cockpit.queue_drain_mode` from the active
+    /// profile's config. Selects how the web composer drains client-side
+    /// queued prompts on Stopped: `combined` (default) joins them with
+    /// blank lines into a single follow-up; `serial` fires them one at a
+    /// time. Cross-device since it lives in config.toml. See #1031.
+    pub cockpit_queue_drain_mode: String,
+    /// Resolved value of `cockpit.max_concurrent_resumes` from the
+    /// active profile's config. Upper bound on parallel cockpit worker
+    /// spawns/attaches the reconciler runs on `aoe serve` cold start.
+    /// Surfaced so the settings UI shows the current value. See #1088.
+    pub cockpit_max_concurrent_resumes: u32,
 }
 
 pub async fn get_about(State(state): State<Arc<AppState>>) -> Json<ServerAbout> {
@@ -409,12 +413,11 @@ pub async fn get_about(State(state): State<Arc<AppState>>) -> Json<ServerAbout> 
     let cockpit_master_enabled = state
         .cockpit_master_enabled
         .load(std::sync::atomic::Ordering::Relaxed);
-    let cockpit_env_enabled = crate::cockpit::experimental_enabled();
-    let experimental_cockpit = cockpit_master_enabled && cockpit_env_enabled;
-    let cockpit_show_tool_durations =
-        crate::session::profile_config::resolve_config_or_warn(&state.profile)
-            .cockpit
-            .show_tool_durations;
+    let cockpit_cfg =
+        crate::session::profile_config::resolve_config_or_warn(&state.profile).cockpit;
+    let cockpit_show_tool_durations = cockpit_cfg.show_tool_durations;
+    let cockpit_queue_drain_mode = cockpit_cfg.queue_drain_mode.as_str().to_string();
+    let cockpit_max_concurrent_resumes = cockpit_cfg.max_concurrent_resumes;
     Json(ServerAbout {
         version: env!("CARGO_PKG_VERSION").to_string(),
         auth_required,
@@ -422,11 +425,82 @@ pub async fn get_about(State(state): State<Arc<AppState>>) -> Json<ServerAbout> 
         read_only: state.read_only,
         behind_tunnel: state.behind_tunnel,
         profile: state.profile.clone(),
-        experimental_cockpit,
         cockpit_master_enabled,
-        cockpit_env_enabled,
         cockpit_show_tool_durations,
+        cockpit_queue_drain_mode,
+        cockpit_max_concurrent_resumes,
     })
+}
+
+// --- Update status ---
+
+/// Web-facing snapshot of `update::check_for_update`. `check_enabled`
+/// mirrors `updates.check_enabled` so the frontend can hide its banner
+/// without separately fetching settings. `web_poll_interval_minutes`
+/// echoes the configured frontend re-poll cadence so the dashboard
+/// doesn't need a second settings round-trip. See #984.
+#[derive(Serialize)]
+pub struct UpdateStatusResponse {
+    pub check_enabled: bool,
+    pub current_version: String,
+    pub latest_version: Option<String>,
+    pub update_available: bool,
+    pub release_url: Option<String>,
+    pub web_poll_interval_minutes: u64,
+    /// Set when the GitHub check failed (e.g. rate-limited, offline).
+    /// Frontend keeps polling on its normal cadence; the banner stays
+    /// hidden until a successful poll. The error is exposed so the
+    /// settings UI can surface a one-liner if useful later.
+    pub error: Option<String>,
+}
+
+pub async fn get_update_status(State(state): State<Arc<AppState>>) -> Json<UpdateStatusResponse> {
+    let cfg = crate::session::profile_config::resolve_config_or_warn(&state.profile);
+    let current = env!("CARGO_PKG_VERSION").to_string();
+
+    if !cfg.updates.check_enabled {
+        return Json(UpdateStatusResponse {
+            check_enabled: false,
+            current_version: current,
+            latest_version: None,
+            update_available: false,
+            release_url: None,
+            web_poll_interval_minutes: cfg.updates.web_poll_interval_minutes,
+            error: None,
+        });
+    }
+
+    match crate::update::check_for_update(&current, false).await {
+        Ok(info) => {
+            let release_url = if info.latest_version.is_empty() {
+                None
+            } else {
+                Some(crate::update::release_page_url(&info.latest_version))
+            };
+            Json(UpdateStatusResponse {
+                check_enabled: true,
+                current_version: info.current_version,
+                latest_version: if info.latest_version.is_empty() {
+                    None
+                } else {
+                    Some(info.latest_version)
+                },
+                update_available: info.available,
+                release_url,
+                web_poll_interval_minutes: cfg.updates.web_poll_interval_minutes,
+                error: None,
+            })
+        }
+        Err(e) => Json(UpdateStatusResponse {
+            check_enabled: true,
+            current_version: current,
+            latest_version: None,
+            update_available: false,
+            release_url: None,
+            web_poll_interval_minutes: cfg.updates.web_poll_interval_minutes,
+            error: Some(e.to_string()),
+        }),
+    }
 }
 
 // --- Profile management ---

@@ -7,10 +7,20 @@
 // surface the key fields (path, command, query) inline in the card
 // header and put output in a syntax-highlighted body.
 
-import { useEffect, useMemo, useState, type CSSProperties } from "react";
-import ReactDiffViewer, { DiffMethod } from "react-diff-viewer-continued";
 import {
+  useEffect,
+  useMemo,
+  useState,
+  type CSSProperties,
+  type ReactNode,
+} from "react";
+import {
+  Brain,
+  Calendar,
+  CalendarPlus,
+  CalendarX,
   ChevronDown,
+  Clock,
   Copy as CopyIcon,
   FileText,
   Globe,
@@ -29,11 +39,19 @@ import { hasAnsi, parseAnsi, type AnsiStyle } from "../../lib/ansi";
 import { parseJsonObject, pickFirst, pickStr } from "../../lib/cockpitArgs";
 import { useCockpitPrefs } from "../../lib/cockpitPrefs";
 import type { ActivityRow, ToolCall } from "../../lib/cockpitTypes";
+import { diffPair } from "../../lib/diffPair";
+import { StringDiff } from "../diff/StringDiff";
+import { ToolErrorBody } from "./ToolErrorBody";
 import {
   classifyMcp,
   humanizeServer,
   humanizeVerb,
 } from "../../lib/mcpClassify";
+import {
+  classifyMemory,
+  parseMemoryFrontmatter,
+  type MemoryHit,
+} from "../../lib/memoryClassify";
 import { reclassifyBash } from "../../lib/toolReclassify";
 
 interface Props {
@@ -43,12 +61,44 @@ interface Props {
 
 /** Keys CockpitRuntime smuggles through `args_preview` for renderer
  *  bookkeeping (the ACP title, the real `started_at` for the duration
- *  label). Excluded from any user-visible input JSON dumps. */
+ *  label, the sub-agent parent tool-call id). Excluded from any
+ *  user-visible input JSON dumps. */
 function isCockpitBookkeepingKey(key: string): boolean {
-  return key === "_aoe_title" || key === "_aoe_started_at";
+  return (
+    key === "_aoe_title" ||
+    key === "_aoe_started_at" ||
+    key === "_aoe_parent_tool_call_id"
+  );
 }
 
-export function ToolCard({ tool, result }: Props) {
+/** Read the smuggled `_aoe_parent_tool_call_id` from a tool's
+ *  args_preview. Present when the tool is a Claude sub-agent (Task)
+ *  child; falsy on top-level tools. See #1041. */
+function hasSubagentParent(tool: ToolCall): boolean {
+  const args = parseJsonObject(tool.args_preview);
+  return Boolean(pickStr(args, "_aoe_parent_tool_call_id"));
+}
+
+interface ToolCardProps extends Props {
+  /** True when rendered inside a SubagentCard body so the dispatcher
+   *  doesn't re-wrap the child in the indented "↳ subagent" frame
+   *  (the SubagentCard's own border already conveys the linkage). */
+  nested?: boolean;
+}
+
+export function ToolCard({ tool, result, nested }: ToolCardProps) {
+  const card = renderToolCard(tool, result);
+  if (!nested && hasSubagentParent(tool)) {
+    return <SubagentChildWrap>{card}</SubagentChildWrap>;
+  }
+  return card;
+}
+
+function renderToolCard(tool: ToolCall, result?: ActivityRow) {
+  const memory = classifyMemory(tool);
+  if (memory.isMemory) {
+    return <MemoryCard tool={tool} result={result} hit={memory} />;
+  }
   const mcp = classifyMcp(tool);
   if (mcp.isMcp) {
     return (
@@ -67,6 +117,10 @@ export function ToolCard({ tool, result }: Props) {
   const todos = classifyTodoWrite(tool);
   if (todos.isTodoWrite) {
     return <TodoUpdateCard tool={tool} result={result} todos={todos.todos} />;
+  }
+  const schedule = classifySchedule(tool);
+  if (schedule.kind) {
+    return <ScheduleToolCard tool={tool} result={result} kind={schedule.kind} />;
   }
   const { kind, provenance } = reclassifyBash(tool);
   switch (kind) {
@@ -89,6 +143,22 @@ export function ToolCard({ tool, result }: Props) {
     default:
       return <GenericToolCard tool={tool} result={result} />;
   }
+}
+
+/** Indented wrap that marks a tool card as a sub-agent (Claude Task)
+ *  child. Keeps the activity feed flat (no tree restructuring yet,
+ *  see #1041 layer B) but gives the user a scannable cue that the
+ *  call belongs to a sub-task. */
+function SubagentChildWrap({ children }: { children: ReactNode }) {
+  return (
+    <div className="border-l-2 border-accent-600/60 pl-2 ml-1">
+      <div className="mb-0.5 inline-flex items-center gap-1 text-[10px] uppercase tracking-wider text-accent-600">
+        <span>↳</span>
+        <span>subagent</span>
+      </div>
+      {children}
+    </div>
+  );
 }
 
 /* ── Shared header bits ──────────────────────────────────────────── */
@@ -461,7 +531,7 @@ function ExecuteToolCard({ tool, result }: Props) {
       expanded={open}
       onToggle={() => setOpen((v) => !v)}
       body={
-        <>
+        <ToolErrorBody status={status} errorText={result?.text}>
           {description && (
             <div className="border-t border-surface-800 bg-surface-900/40 px-3 py-1 text-[11px] text-text-muted italic">
               {description}
@@ -472,14 +542,14 @@ function ExecuteToolCard({ tool, result }: Props) {
               users can read and copy it. Shiki's bash grammar gives
               the same coloring as our markdown code blocks. */}
           <HighlightedBlock text={command} language="bash" maxLines={6} />
-          {output ? (
+          {output && status !== "err" ? (
             <HighlightedBlock text={output} language="bash" maxLines={20} />
-          ) : (
+          ) : status !== "err" ? (
             <div className="border-t border-surface-800 bg-surface-950 px-3 py-2 text-[11px] text-text-dim italic">
               {status === "running" ? "Running…" : "(no output)"}
             </div>
-          )}
-        </>
+          ) : null}
+        </ToolErrorBody>
       }
     />
   );
@@ -518,12 +588,16 @@ function ReadToolCard({ tool, result }: Props) {
           {meta}
         </>
       }
-      expanded={open}
-      onToggle={content ? () => setOpen((v) => !v) : undefined}
+      expanded={open || status === "err"}
+      onToggle={
+        status === "err" || content ? () => setOpen((v) => !v) : undefined
+      }
       body={
-        content && (
-          <HighlightedBlock text={content} language={ext} maxLines={16} />
-        )
+        <ToolErrorBody status={status} errorText={result?.text}>
+          {content && status !== "err" && (
+            <HighlightedBlock text={content} language={ext} maxLines={16} />
+          )}
+        </ToolErrorBody>
       }
     />
   );
@@ -554,15 +628,21 @@ function EditToolCard({ tool, result }: Props) {
   const hasDiff = oldText !== "" || newText !== "";
   const verb = oldText ? "edit" : "write";
 
-  const adds = newText ? newText.split("\n").length : 0;
-  const dels = oldText ? oldText.split("\n").length : 0;
-  const meta = hasDiff && (
+  const { adds, dels } = useMemo(
+    () => diffPair(oldText, newText),
+    [oldText, newText],
+  );
+  const meta = hasDiff && (adds > 0 || dels > 0) && (
     <span className="hidden md:inline text-[11px]">
       <span className="text-emerald-400">+{adds}</span>{" "}
       <span className="text-rose-400">−{dels}</span>
     </span>
   );
 
+  // Hide the "+N -M" chip on failure: no change actually landed, and
+  // the chip reads as a successful diff summary. Surface the adapter's
+  // failure reason via ToolErrorBody instead. See #1090.
+  const errorChip = status === "err";
   return (
     <CardChrome
       status={status}
@@ -571,72 +651,27 @@ function EditToolCard({ tool, result }: Props) {
       icon={<Pencil className="h-3.5 w-3.5" />}
       label={verb}
       primary={path}
-      meta={meta}
-      expanded={open}
-      onToggle={hasDiff ? () => setOpen((v) => !v) : undefined}
+      meta={errorChip ? undefined : meta}
+      expanded={open || status === "err"}
+      onToggle={
+        status === "err" || hasDiff ? () => setOpen((v) => !v) : undefined
+      }
       body={
-        hasDiff && (
-          <div className="cockpit-diff border-t border-surface-800">
-            <ReactDiffViewer
-              oldValue={oldText}
-              newValue={newText}
-              splitView={false}
-              useDarkTheme
-              compareMethod={DiffMethod.WORDS}
-              hideLineNumbers={false}
-              extraLinesSurroundingDiff={0}
-              styles={DIFF_STYLES}
-            />
-          </div>
-        )
+        <ToolErrorBody status={status} errorText={result?.text}>
+          {hasDiff && (
+            <div className="border-t border-surface-800 bg-surface-950">
+              <StringDiff
+                oldText={oldText}
+                newText={newText}
+                filePath={path}
+              />
+            </div>
+          )}
+        </ToolErrorBody>
       }
     />
   );
 }
-
-/** Theme overrides for react-diff-viewer-continued; drag its colors
- *  toward our zinc/brand palette so the diff doesn't look like it was
- *  pasted in from another app. */
-const DIFF_STYLES = {
-  variables: {
-    dark: {
-      diffViewerBackground: "var(--color-surface-950)",
-      diffViewerColor: "var(--color-text-primary)",
-      addedBackground: "rgba(34, 197, 94, 0.08)",
-      addedColor: "rgb(187, 247, 208)",
-      removedBackground: "rgba(239, 68, 68, 0.08)",
-      removedColor: "rgb(254, 202, 202)",
-      wordAddedBackground: "rgba(34, 197, 94, 0.20)",
-      wordRemovedBackground: "rgba(239, 68, 68, 0.20)",
-      addedGutterBackground: "rgba(34, 197, 94, 0.05)",
-      removedGutterBackground: "rgba(239, 68, 68, 0.05)",
-      gutterBackground: "var(--color-surface-900)",
-      gutterBackgroundDark: "var(--color-surface-900)",
-      highlightBackground: "var(--color-surface-800)",
-      highlightGutterBackground: "var(--color-surface-800)",
-      codeFoldGutterBackground: "var(--color-surface-900)",
-      codeFoldBackground: "var(--color-surface-900)",
-      emptyLineBackground: "var(--color-surface-950)",
-      gutterColor: "var(--color-text-dim)",
-      addedGutterColor: "rgb(187, 247, 208)",
-      removedGutterColor: "rgb(254, 202, 202)",
-      codeFoldContentColor: "var(--color-text-dim)",
-      diffViewerTitleBackground: "var(--color-surface-900)",
-      diffViewerTitleColor: "var(--color-text-secondary)",
-      diffViewerTitleBorderColor: "var(--color-surface-800)",
-    },
-  },
-  contentText: {
-    fontSize: "11px",
-    fontFamily:
-      "'Geist Mono', ui-monospace, 'SFMono-Regular', monospace",
-  },
-  gutter: {
-    fontSize: "10px",
-    minWidth: "32px",
-    padding: "0 6px",
-  },
-} as const;
 
 /* ── delete ─────────────────────────────────────────────────────── */
 
@@ -646,6 +681,7 @@ function DeleteToolCard({ tool, result }: Props) {
   const argPath = pickStr(args, "path", "file_path", "filePath", "filename");
   const title = pickStr(args, "_aoe_title");
   const path = pickFirst(argPath, title, tool.name) ?? "(unknown file)";
+  const [open, setOpen] = useState(false);
   return (
     <CardChrome
       status={status}
@@ -654,7 +690,15 @@ function DeleteToolCard({ tool, result }: Props) {
       icon={<Trash2 className="h-3.5 w-3.5 text-rose-400" />}
       label="delete"
       primary={path}
-      expanded={false}
+      expanded={open || status === "err"}
+      onToggle={status === "err" ? () => setOpen((v) => !v) : undefined}
+      body={
+        status === "err" ? (
+          <ToolErrorBody status={status} errorText={result?.text}>
+            {null}
+          </ToolErrorBody>
+        ) : undefined
+      }
     />
   );
 }
@@ -703,31 +747,36 @@ function SearchToolCard({ tool, result, provenance }: SearchProps) {
           )}
         </>
       }
-      expanded={open}
-      onToggle={lines.length > 0 ? () => setOpen((v) => !v) : undefined}
+      expanded={open || status === "err"}
+      onToggle={
+        status === "err" || lines.length > 0 ? () => setOpen((v) => !v) : undefined
+      }
       body={
-        lines.length > 0 && (
-          <div className="border-t border-surface-800 bg-surface-950 max-h-64 overflow-y-auto">
-            {lines.slice(0, 50).map((l, i) => (
-              <div
-                key={i}
-                className="flex font-mono text-[11px] hover:bg-surface-900"
-              >
-                <span className="select-none w-10 shrink-0 px-2 py-0.5 text-right text-text-dim">
-                  {i + 1}
-                </span>
-                <span className="px-2 py-0.5 text-text-secondary truncate">
-                  {l}
-                </span>
-              </div>
-            ))}
-            {lines.length > 50 && (
-              <div className="border-t border-surface-800 px-3 py-1 text-center text-[11px] text-text-dim">
-                {lines.length - 50} more match{lines.length - 50 === 1 ? "" : "es"}
-              </div>
-            )}
-          </div>
-        )
+        <ToolErrorBody status={status} errorText={result?.text}>
+          {lines.length > 0 && status !== "err" && (
+            <div className="border-t border-surface-800 bg-surface-950 max-h-64 overflow-y-auto">
+              {lines.slice(0, 50).map((l, i) => (
+                <div
+                  key={i}
+                  className="flex font-mono text-[11px] hover:bg-surface-900"
+                >
+                  <span className="select-none w-10 shrink-0 px-2 py-0.5 text-right text-text-dim">
+                    {i + 1}
+                  </span>
+                  <span className="px-2 py-0.5 text-text-secondary truncate">
+                    {l}
+                  </span>
+                </div>
+              ))}
+              {lines.length > 50 && (
+                <div className="border-t border-surface-800 px-3 py-1 text-center text-[11px] text-text-dim">
+                  {lines.length - 50} more match
+                  {lines.length - 50 === 1 ? "" : "es"}
+                </div>
+              )}
+            </div>
+          )}
+        </ToolErrorBody>
       }
     />
   );
@@ -752,10 +801,16 @@ function FetchToolCard({ tool, result }: Props) {
       icon={<Globe className="h-3.5 w-3.5" />}
       label="fetch"
       primary={url}
-      expanded={open}
-      onToggle={output ? () => setOpen((v) => !v) : undefined}
+      expanded={open || status === "err"}
+      onToggle={
+        status === "err" || output ? () => setOpen((v) => !v) : undefined
+      }
       body={
-        output && <HighlightedBlock text={output} language="json" maxLines={16} />
+        <ToolErrorBody status={status} errorText={result?.text}>
+          {output && status !== "err" && (
+            <HighlightedBlock text={output} language="json" maxLines={16} />
+          )}
+        </ToolErrorBody>
       }
     />
   );
@@ -871,28 +926,30 @@ function TodoUpdateCard({ tool, result, todos }: TodoCardProps) {
           )}
         </>
       }
-      expanded={open}
+      expanded={open || status === "err"}
       onToggle={() => setOpen((v) => !v)}
       startedAt={tool.started_at}
       endedAt={result?.at}
       body={
-        <div className="border-t border-surface-800 bg-surface-950 px-3 py-2">
-          <ul className="flex flex-col gap-1 font-mono text-xs">
-            {todos.map((t, i) => (
-              <li
-                key={`${i}-${t.content}`}
-                className={`flex items-start gap-2 ${TODO_CLASS[t.status]}`}
-              >
-                <span className="select-none w-4 shrink-0 text-center">
-                  {TODO_GLYPH[t.status]}
-                </span>
-                <span className="min-w-0 flex-1 whitespace-pre-wrap break-words">
-                  {t.content}
-                </span>
-              </li>
-            ))}
-          </ul>
-        </div>
+        <ToolErrorBody status={status} errorText={result?.text}>
+          <div className="border-t border-surface-800 bg-surface-950 px-3 py-2">
+            <ul className="flex flex-col gap-1 font-mono text-xs">
+              {todos.map((t, i) => (
+                <li
+                  key={`${i}-${t.content}`}
+                  className={`flex items-start gap-2 ${TODO_CLASS[t.status]}`}
+                >
+                  <span className="select-none w-4 shrink-0 text-center">
+                    {TODO_GLYPH[t.status]}
+                  </span>
+                  <span className="min-w-0 flex-1 whitespace-pre-wrap break-words">
+                    {t.content}
+                  </span>
+                </li>
+              ))}
+            </ul>
+          </div>
+        </ToolErrorBody>
       }
     />
   );
@@ -952,12 +1009,14 @@ function SkillToolCard({ tool, result, skillName }: SkillProps) {
       icon={<Sparkles className="h-3.5 w-3.5" />}
       label="skill"
       primary={skillName}
-      expanded={open}
-      onToggle={hasBody ? () => setOpen((v) => !v) : undefined}
+      expanded={open || status === "err"}
+      onToggle={
+        status === "err" || hasBody ? () => setOpen((v) => !v) : undefined
+      }
       startedAt={tool.started_at}
       endedAt={result?.at}
       body={
-        <>
+        <ToolErrorBody status={status} errorText={result?.text}>
           {args && Object.keys(args).filter((k) => !isCockpitBookkeepingKey(k)).length > 0 && (
             <div className="border-t border-surface-800 bg-surface-950 px-3 py-2">
               <div className="mb-1 flex items-center justify-between text-[10px] uppercase tracking-wider text-text-dim">
@@ -969,10 +1028,10 @@ function SkillToolCard({ tool, result, skillName }: SkillProps) {
               </pre>
             </div>
           )}
-          {output && (
+          {output && status !== "err" && (
             <HighlightedBlock text={output} language="markdown" maxLines={16} />
           )}
-        </>
+        </ToolErrorBody>
       }
     />
   );
@@ -1047,6 +1106,105 @@ export function ToolGroupCard({ items }: { items: ToolGroupItem[] }) {
                 result={item.result}
               />
             ))}
+          </div>
+        )
+      }
+    />
+  );
+}
+
+/* ── subagent ───────────────────────────────────────────────────── */
+
+interface SubagentChildItem {
+  tool: ToolCall;
+  result?: ActivityRow;
+}
+
+interface SubagentProps {
+  tool: ToolCall;
+  result?: ActivityRow;
+  children: SubagentChildItem[];
+}
+
+/** Card for a Claude sub-agent (Task) and its child tool calls. The
+ *  parent Task shows in the header; the body lists the children using
+ *  the same ToolCard dispatch as top-level calls (with `nested=true`
+ *  so the indented "↳ subagent" wrap doesn't double up). See #1041. */
+export function SubagentCard({ tool, result, children }: SubagentProps) {
+  const [open, setOpen] = useState(false);
+
+  const args = useMemo(
+    () => parseJsonObject(tool.args_preview),
+    [tool.args_preview],
+  );
+  const description =
+    pickStr(args, "description", "_aoe_title") ?? tool.name ?? "Subagent task";
+
+  const runningChildren = children.filter((c) => !c.result).length;
+  const errorChildren = children.filter(
+    (c) => c.result && c.result.kind === "tool_error",
+  ).length;
+  const parentDone = result !== undefined;
+  const status: Status =
+    !parentDone || runningChildren > 0
+      ? "running"
+      : errorChildren > 0
+        ? "err"
+        : "ok";
+
+  // Span the earliest started_at across the parent and any children
+  // (children typically start slightly after the parent) and the
+  // latest completion. Mirrors ToolGroupCard so the duration label
+  // reflects total subagent runtime.
+  const startedAt = [tool.started_at, ...children.map((c) => c.tool.started_at)]
+    .sort()
+    .at(0);
+  const allDone =
+    parentDone && children.every((c) => c.result !== undefined);
+  const endedAt = allDone
+    ? [
+        result?.at ?? null,
+        ...children.map((c) => c.result?.at ?? null),
+      ]
+        .filter((v): v is string => v !== null)
+        .sort()
+        .at(-1)
+    : undefined;
+
+  return (
+    <CardChrome
+      status={status}
+      startedAt={startedAt}
+      endedAt={endedAt}
+      icon={<Sparkles className="h-3.5 w-3.5" />}
+      label="subagent"
+      primary={
+        <>
+          <span className="truncate">{description}</span>
+          <span className="ml-2 text-text-dim">
+            · {children.length} {children.length === 1 ? "tool" : "tools"}
+          </span>
+        </>
+      }
+      expanded={open}
+      onToggle={() => setOpen((v) => !v)}
+      body={
+        open && (
+          <div className="border-t border-surface-800 bg-surface-900/30 px-2 py-1">
+            {children.length === 0 ? (
+              <div className="px-2 py-1 text-[11px] text-text-dim">
+                No tool calls recorded yet.
+              </div>
+            ) : (
+              children.map((c) => (
+                <ToolCard
+                  key={c.tool.id}
+                  tool={c.tool}
+                  result={c.result}
+                  nested
+                />
+              ))
+            )}
           </div>
         )
       }
@@ -1149,10 +1307,12 @@ function McpToolCard({ tool, result, server, verb }: McpProps) {
           )}
         </>
       }
-      expanded={open}
-      onToggle={hasBody ? () => setOpen((v) => !v) : undefined}
+      expanded={open || status === "err"}
+      onToggle={
+        status === "err" || hasBody ? () => setOpen((v) => !v) : undefined
+      }
       body={
-        <>
+        <ToolErrorBody status={status} errorText={result?.text}>
           {args && Object.keys(args).filter((k) => !isCockpitBookkeepingKey(k)).length > 0 && (
             <div className="border-t border-surface-800 bg-surface-950 px-3 py-2">
               <div className="mb-1 flex items-center justify-between text-[10px] uppercase tracking-wider text-text-dim">
@@ -1164,10 +1324,325 @@ function McpToolCard({ tool, result, server, verb }: McpProps) {
               </pre>
             </div>
           )}
-          {output && (
+          {output && status !== "err" && (
             <HighlightedBlock text={output} language="markdown" maxLines={24} />
           )}
+        </ToolErrorBody>
+      }
+    />
+  );
+}
+
+/* ── memory ─────────────────────────────────────────────────────── */
+
+interface MemoryCardProps extends Props {
+  hit: MemoryHit;
+}
+
+/** Dedicated card for Claude's memory-system file ops. Memory lives
+ *  under `~/.claude/projects/<slug>/memory/*.md` and the agent touches
+ *  it via plain Read/Edit/Write, so the upstream tool kind is the same
+ *  as any other file op. We branch on the path predicate in
+ *  classifyMemory and render here. See issue #1071. */
+function MemoryCard({ tool, result, hit }: MemoryCardProps) {
+  const status = statusFor(result);
+  const [open, setOpen] = useState(false);
+
+  const args = useMemo(
+    () => parseJsonObject(tool.args_preview),
+    [tool.args_preview],
+  );
+
+  const content = useMemo<string>(() => {
+    if (hit.verb === "recalled") return result?.text ?? "";
+    const fromArgs =
+      pickStr(args, "new_string", "newString", "new_str", "content") ?? "";
+    return fromArgs;
+  }, [hit.verb, args, result?.text]);
+
+  const parsed = useMemo(
+    () => (content ? parseMemoryFrontmatter(content) : null),
+    [content],
+  );
+
+  const verbLabel = hit.isIndex && hit.verb === "recalled"
+    ? "read index"
+    : hit.verb;
+  const headerLabel = hit.isIndex ? "Memory index" : "Memory";
+
+  const meta = parsed?.type && (
+    <span className="hidden md:inline text-[11px] text-text-dim">
+      {parsed.type}
+    </span>
+  );
+
+  const hasBody = Boolean(content);
+
+  return (
+    <CardChrome
+      status={status}
+      startedAt={tool.started_at}
+      endedAt={result?.at}
+      icon={<Brain className="h-3.5 w-3.5" />}
+      label={headerLabel}
+      primary={
+        <>
+          <span>{verbLabel}</span>
+          <span className="ml-2 text-text-dim">· {hit.basename}</span>
         </>
+      }
+      meta={meta}
+      expanded={open || status === "err"}
+      onToggle={
+        status === "err" || hasBody ? () => setOpen((v) => !v) : undefined
+      }
+      body={
+        <ToolErrorBody status={status} errorText={result?.text}>
+          {hasBody && parsed && status !== "err" ? (
+          <div className="border-t border-surface-800 bg-surface-950">
+            {(parsed.name || parsed.description || parsed.type) && (
+              <dl className="grid grid-cols-[auto_1fr] gap-x-3 gap-y-0.5 px-3 py-2 text-[11px]">
+                {parsed.name && (
+                  <>
+                    <dt className="text-text-dim">name</dt>
+                    <dd className="text-text-secondary">{parsed.name}</dd>
+                  </>
+                )}
+                {parsed.type && (
+                  <>
+                    <dt className="text-text-dim">type</dt>
+                    <dd className="text-text-secondary">{parsed.type}</dd>
+                  </>
+                )}
+                {parsed.description && (
+                  <>
+                    <dt className="text-text-dim">description</dt>
+                    <dd className="text-text-secondary">
+                      {parsed.description}
+                    </dd>
+                  </>
+                )}
+              </dl>
+            )}
+            {parsed.body && (
+              <HighlightedBlock
+                text={parsed.body}
+                language="markdown"
+                maxLines={24}
+              />
+            )}
+          </div>
+          ) : null}
+        </ToolErrorBody>
+      }
+    />
+  );
+}
+
+/* ── schedule (ScheduleWakeup / Cron* family) ───────────────────── */
+
+/** Classify the Claude Agent SDK scheduling tools by their well-known
+ *  names. claude-agent-acp routes them all through the generic `Other`
+ *  arm with no structured kind, so we name-match. See #1091.
+ *
+ *  Returns `kind: null` for non-schedule tools; otherwise one of:
+ *  - `"wakeup"`: ScheduleWakeup ({ delaySeconds, prompt, reason })
+ *  - `"cron_create"`: CronCreate
+ *  - `"cron_list"`: CronList
+ *  - `"cron_delete"`: CronDelete
+ */
+function classifySchedule(
+  tool: ToolCall,
+): { kind: "wakeup" | "cron_create" | "cron_list" | "cron_delete" | null } {
+  if (tool.kind !== "other") return { kind: null };
+  const args = parseJsonObject(tool.args_preview);
+  // ACP titles come through the `_aoe_title` smuggle; the tool's own
+  // `name` is usually the same value but matching both keeps us robust
+  // to upstream relabels (e.g. claude-agent-acp future kind handling).
+  const title = (pickStr(args, "_aoe_title") ?? tool.name ?? "").trim();
+  switch (title) {
+    case "ScheduleWakeup":
+      return { kind: "wakeup" };
+    case "CronCreate":
+      return { kind: "cron_create" };
+    case "CronList":
+      return { kind: "cron_list" };
+    case "CronDelete":
+      return { kind: "cron_delete" };
+    default:
+      return { kind: null };
+  }
+}
+
+/** Format `seconds` as a short human-readable duration: `45s`, `3m 14s`,
+ *  `1h 7m`, `2d 4h`. Used in schedule card headers so users see "wake
+ *  in 3m 14s" instead of `delaySeconds: 194`. */
+function formatDurationSeconds(seconds: number): string {
+  const s = Math.max(0, Math.floor(seconds));
+  if (s < 60) return `${s}s`;
+  const m = Math.floor(s / 60);
+  if (m < 60) {
+    const rem = s % 60;
+    return rem === 0 ? `${m}m` : `${m}m ${rem}s`;
+  }
+  const h = Math.floor(m / 60);
+  if (h < 24) {
+    const rem = m % 60;
+    return rem === 0 ? `${h}h` : `${h}h ${rem}m`;
+  }
+  const d = Math.floor(h / 24);
+  const rem = h % 24;
+  return rem === 0 ? `${d}d` : `${d}d ${rem}h`;
+}
+
+/** Format an absolute clock time as `HH:MM` (24h, local timezone) for
+ *  the wake-at meta line. */
+function formatClockTime(date: Date): string {
+  const hh = String(date.getHours()).padStart(2, "0");
+  const mm = String(date.getMinutes()).padStart(2, "0");
+  return `${hh}:${mm}`;
+}
+
+interface ScheduleProps extends Props {
+  kind: "wakeup" | "cron_create" | "cron_list" | "cron_delete";
+}
+
+function ScheduleToolCard({ tool, result, kind }: ScheduleProps) {
+  const status = statusFor(result);
+  const [open, setOpen] = useState(false);
+  const args = useMemo(
+    () => parseJsonObject(tool.args_preview),
+    [tool.args_preview],
+  );
+  const output = result?.text ?? "";
+
+  // Hide the bookkeeping fields and (for wakeup) the `prompt` field:
+  // it's either the `<<autonomous-loop-dynamic>>` sentinel or a repeat
+  // of the user's prior input, never user-relevant in the card view.
+  const inputJson = useMemo<string>(() => {
+    if (!args) return tool.args_preview;
+    const rest: Record<string, unknown> = {};
+    for (const [k, v] of Object.entries(args)) {
+      if (isCockpitBookkeepingKey(k)) continue;
+      if (kind === "wakeup" && k === "prompt") continue;
+      rest[k] = v;
+    }
+    return JSON.stringify(rest, null, 2);
+  }, [args, tool.args_preview, kind]);
+
+  const hasRawInput = useMemo(() => {
+    if (!args) return Boolean(tool.args_preview);
+    return Object.keys(args).some(
+      (k) =>
+        !isCockpitBookkeepingKey(k) && !(kind === "wakeup" && k === "prompt"),
+    );
+  }, [args, tool.args_preview, kind]);
+
+  let icon: React.ReactNode;
+  let label: string;
+  let primary: React.ReactNode;
+  let meta: React.ReactNode = undefined;
+
+  if (kind === "wakeup") {
+    const delayRaw = args ? args["delaySeconds"] : undefined;
+    const delaySeconds =
+      typeof delayRaw === "number"
+        ? delayRaw
+        : typeof delayRaw === "string"
+          ? Number(delayRaw)
+          : NaN;
+    const reason = pickStr(args, "reason");
+    const started = Date.parse(tool.started_at);
+    const wakeAt =
+      Number.isFinite(started) && Number.isFinite(delaySeconds)
+        ? new Date(started + delaySeconds * 1000)
+        : null;
+    icon = <Clock className="h-3.5 w-3.5" />;
+    label = "scheduled wakeup";
+    primary = (
+      <span>
+        {Number.isFinite(delaySeconds)
+          ? `in ${formatDurationSeconds(delaySeconds)}`
+          : "scheduled"}
+        {reason ? (
+          <span className="text-text-dim">: {reason}</span>
+        ) : null}
+      </span>
+    );
+    if (wakeAt) {
+      meta = (
+        <span className="hidden md:inline text-[11px] text-text-dim tabular-nums">
+          wakes at {formatClockTime(wakeAt)}
+        </span>
+      );
+    }
+  } else if (kind === "cron_create") {
+    const schedule = pickStr(args, "schedule", "cron", "expression");
+    const reason = pickStr(args, "reason");
+    icon = <CalendarPlus className="h-3.5 w-3.5" />;
+    label = "cron schedule created";
+    primary = (
+      <span>
+        {schedule ? (
+          <span className="font-mono">{schedule}</span>
+        ) : (
+          "schedule created"
+        )}
+        {reason ? (
+          <span className="text-text-dim">: {reason}</span>
+        ) : null}
+      </span>
+    );
+  } else if (kind === "cron_list") {
+    icon = <Calendar className="h-3.5 w-3.5" />;
+    label = "cron schedules";
+    primary = "list active schedules";
+  } else {
+    // cron_delete
+    const id = pickStr(args, "id", "name");
+    icon = <CalendarX className="h-3.5 w-3.5" />;
+    label = "cron schedule deleted";
+    primary = id ? <span className="font-mono">{id}</span> : "deleted";
+  }
+
+  const hasBody = hasRawInput || Boolean(output) || status === "err";
+
+  return (
+    <CardChrome
+      status={status}
+      icon={icon}
+      label={label}
+      primary={primary}
+      meta={meta}
+      expanded={open || status === "err"}
+      onToggle={hasBody ? () => setOpen((v) => !v) : undefined}
+      startedAt={tool.started_at}
+      endedAt={result?.at}
+      body={
+        <ToolErrorBody status={status} errorText={result?.text}>
+          {hasRawInput && (
+            <div className="border-t border-surface-800 bg-surface-950 px-3 py-2">
+              <div className="mb-1 flex items-center justify-between text-[10px] uppercase tracking-wider text-text-dim">
+                <span>input</span>
+                <CopyButton text={inputJson} />
+              </div>
+              <pre className="overflow-x-auto font-mono text-[11px] text-text-muted whitespace-pre-wrap break-all">
+                {inputJson}
+              </pre>
+            </div>
+          )}
+          {output && status !== "err" && (
+            <div className="border-t border-surface-800 bg-surface-950 px-3 py-2">
+              <div className="mb-1 flex items-center justify-between text-[10px] uppercase tracking-wider text-text-dim">
+                <span>output</span>
+                <CopyButton text={output} />
+              </div>
+              <pre className="overflow-x-auto font-mono text-[11px] text-text-secondary whitespace-pre-wrap break-all">
+                {output}
+              </pre>
+            </div>
+          )}
+        </ToolErrorBody>
       }
     />
   );
@@ -1187,10 +1662,14 @@ function GenericToolCard({ tool, result }: Props) {
       icon={<Sparkles className="h-3.5 w-3.5" />}
       label={tool.kind || "tool"}
       primary={tool.name}
-      expanded={open}
-      onToggle={tool.args_preview || output ? () => setOpen((v) => !v) : undefined}
+      expanded={open || status === "err"}
+      onToggle={
+        status === "err" || tool.args_preview || output
+          ? () => setOpen((v) => !v)
+          : undefined
+      }
       body={
-        <>
+        <ToolErrorBody status={status} errorText={result?.text}>
           {tool.args_preview && (
             <div className="border-t border-surface-800 bg-surface-950 px-3 py-2">
               <div className="mb-1 flex items-center justify-between text-[10px] uppercase tracking-wider text-text-dim">
@@ -1202,7 +1681,7 @@ function GenericToolCard({ tool, result }: Props) {
               </pre>
             </div>
           )}
-          {output && (
+          {output && status !== "err" && (
             <div className="border-t border-surface-800 bg-surface-950 px-3 py-2">
               <div className="mb-1 flex items-center justify-between text-[10px] uppercase tracking-wider text-text-dim">
                 <span>output</span>
@@ -1213,7 +1692,7 @@ function GenericToolCard({ tool, result }: Props) {
               </pre>
             </div>
           )}
-        </>
+        </ToolErrorBody>
       }
     />
   );

@@ -562,6 +562,11 @@ impl SettingsView {
                     u.notify_in_cli = None;
                 }
             }
+            FieldKey::WebPollIntervalMinutes => {
+                if let Some(ref mut u) = config.updates {
+                    u.web_poll_interval_minutes = None;
+                }
+            }
             // Worktree
             FieldKey::WorktreeEnabled => {
                 if let Some(ref mut w) = config.worktree {
@@ -782,7 +787,8 @@ impl SettingsView {
             FieldKey::WebNotificationsEnabled
             | FieldKey::WebNotifyOnWaiting
             | FieldKey::WebNotifyOnIdle
-            | FieldKey::WebNotifyOnError => {}
+            | FieldKey::WebNotifyOnError
+            | FieldKey::WebNotifyOnWakeFire => {}
             // Cockpit overrides clear by setting the override field to None.
             FieldKey::CockpitEnabled => {
                 if let Some(c) = config.cockpit.as_mut() {
@@ -823,6 +829,19 @@ impl SettingsView {
                 if let Some(c) = config.cockpit.as_mut() {
                     c.show_tool_durations = None;
                 }
+            }
+            FieldKey::CockpitQueueDrainMode => {
+                if let Some(c) = config.cockpit.as_mut() {
+                    c.queue_drain_mode = None;
+                }
+            }
+            FieldKey::CockpitMaxConcurrentResumes => {
+                if let Some(c) = config.cockpit.as_mut() {
+                    c.max_concurrent_resumes = None;
+                }
+            }
+            FieldKey::HostEnvironment => {
+                config.environment = None;
             }
         }
 

@@ -43,6 +43,13 @@ pub struct AddArgs {
     #[arg(short = 'b', long = "new-branch")]
     create_branch: bool,
 
+    /// Branch to base the new worktree branch on (use with --new-branch).
+    /// Defaults to the repository's default branch. Useful for stacking
+    /// work on top of an in-flight PR branch, hot-fixing a release
+    /// branch, or branching off a teammate's branch.
+    #[arg(long = "base-branch")]
+    base_branch: Option<String>,
+
     /// Additional repositories for multi-repo workspace (use with --worktree)
     #[arg(long = "repo", short = 'r')]
     extra_repos: Vec<PathBuf>,
@@ -165,6 +172,7 @@ pub async fn run(profile: &str, args: AddArgs) -> Result<()> {
                 &all_extra_repos,
                 branch,
                 args.create_branch,
+                args.base_branch.as_deref(),
                 &config.worktree.workspace_path_template,
                 init_submodules,
             )?;
@@ -215,7 +223,13 @@ pub async fn run(profile: &str, args: AddArgs) -> Result<()> {
             }
 
             println!("Creating worktree at: {}", worktree_path.display());
-            let warnings = git_wt.create_worktree(branch, &worktree_path, args.create_branch)?;
+            let base = if args.create_branch {
+                args.base_branch.as_deref()
+            } else {
+                None
+            };
+            let warnings =
+                git_wt.create_worktree(branch, &worktree_path, args.create_branch, base)?;
 
             path = worktree_path;
 
@@ -224,6 +238,7 @@ pub async fn run(profile: &str, args: AddArgs) -> Result<()> {
                 main_repo_path: main_repo_path.to_string_lossy().to_string(),
                 managed_by_aoe: true,
                 created_at: Utc::now(),
+                base_branch: base.map(|s| s.to_string()),
             });
 
             for w in &warnings {
@@ -378,41 +393,25 @@ pub async fn run(profile: &str, args: AddArgs) -> Result<()> {
     // forces terminal mode; otherwise honor the config default for
     // claude on supported platforms.
     //
-    // Two independent gates:
-    //   - `cockpit.enabled = false` in config.toml is the persistent
-    //     master switch.
-    //   - `AOE_EXPERIMENTAL_COCKPIT=1` is the per-process opt-in for
-    //     *new* sessions while the feature stabilises.
-    // Each refuses `--cockpit` with its own actionable error so the
-    // user knows which knob to flip.
+    // `cockpit.enabled = false` in config.toml is the master switch
+    // that gates `--cockpit`. The toggle lives in the web settings.
     #[cfg(feature = "serve")]
     {
         let user_picked_cockpit = args.cockpit || args.agent.is_some();
         let user_forced_terminal = args.no_cockpit;
-        if user_picked_cockpit {
-            if !config.cockpit.enabled {
-                bail!(
-                    "Cockpit is disabled by config (`cockpit.enabled = false` in config.toml). \
-                     Toggle it on (e.g. via the settings TUI) and try again, or omit --cockpit \
-                     for a tmux session."
-                );
-            }
-            if !crate::cockpit::experimental_enabled() {
-                bail!(
-                    "Cockpit is experimental. Set AOE_EXPERIMENTAL_COCKPIT=1 to opt in, or omit --cockpit / --agent for a tmux session."
-                );
-            }
+        if user_picked_cockpit && !config.cockpit.enabled {
+            bail!(
+                "Cockpit is disabled by config (`cockpit.enabled = false` in config.toml). \
+                 Toggle it on (e.g. via the web settings) and try again, or omit --cockpit \
+                 for a tmux session."
+            );
         }
-        let allow_default_cockpit = crate::cockpit::experimental_enabled();
         instance.cockpit_mode = if user_forced_terminal {
             false
         } else if user_picked_cockpit {
             true
         } else {
-            allow_default_cockpit
-                && config.cockpit.enabled
-                && config.cockpit.default_for_claude
-                && instance.tool == "claude"
+            config.cockpit.enabled && config.cockpit.default_for_claude && instance.tool == "claude"
         };
         instance.cockpit_agent = args.agent.clone();
         instance.cockpit_model = args.model.clone();

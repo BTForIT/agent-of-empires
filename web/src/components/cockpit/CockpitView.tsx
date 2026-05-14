@@ -18,13 +18,19 @@ import {
   MessagePrimitive,
   ThreadPrimitive,
 } from "@assistant-ui/react";
-import { ChevronDown, ListChecks } from "lucide-react";
+import { Check, ChevronDown, Clock, ListChecks, X } from "lucide-react";
 
 import { ApprovalCard } from "./ApprovalCard";
-import { CockpitRuntime, TOOL_GROUP_NAME, type CockpitContext } from "./CockpitRuntime";
+import {
+  CockpitRuntime,
+  SUBAGENT_TASK_NAME,
+  TOOL_GROUP_NAME,
+  type CockpitContext,
+} from "./CockpitRuntime";
 import { Composer } from "./Composer";
+import { ContextPrimerBanner } from "./ContextPrimerBanner";
 import { Markdown } from "./Markdown";
-import { ToolCard, ToolGroupCard } from "./ToolCards";
+import { SubagentCard, ToolCard, ToolGroupCard } from "./ToolCards";
 import {
   SPINNER_FRAMES,
   SPINNER_INTERVAL_MS,
@@ -36,11 +42,16 @@ import type {
   ApprovalDecision,
   CockpitState,
   Plan,
+  QueuedPrompt,
   ToolCall,
 } from "../../lib/cockpitTypes";
 
 interface Props {
   sessionId: string;
+  /** Cockpit worker lifecycle pulled from `SessionResponse.cockpit_worker_state`
+   *  (REST-poll-driven, ~3s cadence). Drives the `WorkerResumingBanner`
+   *  while the reconciler is mid-spawn/attach. See #1088. */
+  cockpitWorkerState: "absent" | "resuming" | "running";
 }
 
 const STARTER_PROMPTS = [
@@ -49,22 +60,44 @@ const STARTER_PROMPTS = [
   "What does the build pipeline do?",
 ];
 
-export function CockpitView({ sessionId }: Props) {
+export function CockpitView({ sessionId, cockpitWorkerState }: Props) {
   return (
-    <CockpitRuntime sessionId={sessionId}>
-      {(ctx) => <CockpitChrome sessionId={sessionId} {...ctx} />}
+    <CockpitRuntime
+      sessionId={sessionId}
+      cockpitWorkerState={cockpitWorkerState}
+    >
+      {(ctx) => (
+        <CockpitChrome
+          sessionId={sessionId}
+          cockpitWorkerState={cockpitWorkerState}
+          {...ctx}
+        />
+      )}
     </CockpitRuntime>
   );
 }
 
 function CockpitChrome({
   sessionId,
+  cockpitWorkerState,
   state,
   status,
   resolveApproval,
   sendPrompt,
   dismissError,
-}: CockpitContext & { sessionId: string }) {
+  removeQueuedPrompt,
+  editQueuedPrompt,
+  clearQueue,
+}: CockpitContext & {
+  sessionId: string;
+  cockpitWorkerState: "absent" | "resuming" | "running";
+}) {
+  // Composer prefill keyed for re-fires; set by the
+  // ContextPrimerBanner on click. Local rather than on CockpitState
+  // because it's a one-shot UI action, not part of the event log.
+  const [primerPrefill, setPrimerPrefill] = useState<
+    { id: string; text: string } | null
+  >(null);
   return (
     <div className="flex h-full flex-col bg-surface-900 text-text-primary">
       <PlanStrip plan={state.plan} mode={state.mode} />
@@ -86,6 +119,20 @@ function CockpitChrome({
       {state.workerRestarting && !state.startupError && !state.workerStopped && (
         <WorkerRestartingBanner />
       )}
+      {cockpitWorkerState === "resuming" &&
+        !state.startupError &&
+        !state.workerStopped &&
+        !state.workerRestarting && <WorkerResumingBanner />}
+      {state.nextWakeupAt &&
+        !state.turnActive &&
+        !state.startupError &&
+        !state.workerStopped &&
+        !state.workerRestarting && (
+          <ScheduledWakeupBanner
+            wakeAt={state.nextWakeupAt}
+            reason={state.nextWakeupReason}
+          />
+        )}
       {state.lastError && (
         <InteractionErrorBanner
           message={state.lastError}
@@ -129,6 +176,24 @@ function CockpitChrome({
           </div>
         </ThreadPrimitive.Viewport>
 
+        <QueuedPromptsStrip
+          queued={state.queuedPrompts}
+          onRemove={removeQueuedPrompt}
+          onEdit={editQueuedPrompt}
+          onClear={clearQueue}
+        />
+
+        <ContextPrimerBanner
+          sessionId={sessionId}
+          available={state.contextPrimerAvailable}
+          onInsertPrimer={(text) =>
+            setPrimerPrefill({
+              id: `primer-${state.contextPrimerAvailable?.resetSeq ?? 0}-${Date.now()}`,
+              text,
+            })
+          }
+        />
+
         <Composer
           sessionId={sessionId}
           availableModes={state.availableModes}
@@ -137,6 +202,10 @@ function CockpitChrome({
           sessionUsage={state.sessionUsage}
           availableCommands={state.availableCommands}
           connected={status === "open" && !state.workerStopped && !state.workerRestarting}
+          turnActive={state.turnActive}
+          queuedCount={state.queuedPrompts.length}
+          enqueuePrompt={sendPrompt}
+          primerPrefill={primerPrefill}
         />
       </ThreadPrimitive.Root>
     </div>
@@ -221,6 +290,10 @@ function AssistantToolCall(props: ToolCallProps) {
   // each one with its normal per-kind card on expand.
   if (props.toolName === TOOL_GROUP_NAME) {
     return <AssistantToolGroup argsText={props.argsText} />;
+  }
+
+  if (props.toolName === SUBAGENT_TASK_NAME) {
+    return <AssistantSubagentTask argsText={props.argsText} />;
   }
 
   // Reconstruct the ToolCall shape our existing ToolCards.tsx
@@ -359,6 +432,79 @@ function AssistantToolGroup({ argsText }: { argsText?: string }) {
     return { tool, result, kind: c.toolName };
   });
   return <ToolGroupCard items={items} />;
+}
+
+interface SubagentPayload {
+  parent: GroupChild;
+  children: GroupChild[];
+}
+
+/** Reconstructs the parent Task tool plus its sub-agent children from
+ *  the synthetic `_aoe_subagent_task` part CockpitRuntime emits, then
+ *  hands them to SubagentCard. See #1041 layer B. */
+function AssistantSubagentTask({ argsText }: { argsText?: string }) {
+  let payload: SubagentPayload | null = null;
+  if (argsText) {
+    try {
+      const parsed = JSON.parse(argsText);
+      if (
+        parsed &&
+        typeof parsed === "object" &&
+        parsed.parent &&
+        Array.isArray(parsed.children)
+      ) {
+        payload = parsed as SubagentPayload;
+      }
+    } catch {
+      // Malformed; render nothing rather than crashing.
+    }
+  }
+  if (!payload) return null;
+
+  const reconstruct = (c: GroupChild) => {
+    const fallbackAt = toolCallTimestamp(c.toolCallId);
+    let parsedArgs: Record<string, unknown> = {};
+    try {
+      const p = JSON.parse(c.argsText);
+      if (p && typeof p === "object" && !Array.isArray(p)) {
+        parsedArgs = p as Record<string, unknown>;
+      }
+    } catch {
+      // ignore
+    }
+    const startedAt = pickStartedAt(parsedArgs, c.argsText) ?? fallbackAt;
+    const endedAt = pickEndedAt(c.result) ?? fallbackAt;
+    const tool: ToolCall = {
+      id: c.toolCallId,
+      name: prettifyToolName(c.toolName, parsedArgs),
+      kind: c.toolName,
+      args_preview: c.argsText,
+      started_at: startedAt,
+    };
+    const result =
+      c.result !== undefined
+        ? {
+            id: `done-${c.toolCallId}`,
+            kind: c.isError
+              ? ("tool_error" as const)
+              : ("tool_complete" as const),
+            text: c.result.content,
+            toolCallId: c.toolCallId,
+            at: endedAt,
+          }
+        : undefined;
+    return { tool, result };
+  };
+
+  const parent = reconstruct(payload.parent);
+  const children = payload.children.map(reconstruct);
+  return (
+    <SubagentCard
+      tool={parent.tool}
+      result={parent.result}
+      children={children}
+    />
+  );
 }
 
 function prettifyToolName(
@@ -687,6 +833,83 @@ function WorkerRestartingBanner() {
   );
 }
 
+function WorkerResumingBanner() {
+  // Shown while `SessionResponse.cockpit_worker_state === "resuming"`:
+  // the reconciler is mid-spawn or mid-attach. The cached transcript
+  // stays scrollable and the composer keeps queuing prompts; the banner
+  // clears as soon as the next session-list poll sees the worker in
+  // `running` state (typically within a few hundred ms of completion).
+  // See #1088.
+  return (
+    <div className="flex items-center gap-2 border-b border-amber-900/60 bg-amber-950/40 px-4 py-2 text-xs text-amber-200">
+      <span
+        className="inline-block h-2 w-2 animate-pulse rounded-full bg-amber-400"
+        aria-hidden
+      />
+      <span>
+        Resuming cockpit worker… cached transcript still available. Queued
+        prompts will send once the agent is back online.
+      </span>
+    </div>
+  );
+}
+
+/** Top-of-cockpit chip shown while the agent's `ScheduleWakeup` is
+ *  pending. Visible only when no turn is in flight (turns produce their
+ *  own busy chrome) and no other recovery banner is up. 1Hz local tick
+ *  for the countdown; once the wake fires the next UserPromptSent
+ *  clears `state.nextWakeupAt` on the reducer side and this unmounts.
+ *  See #1091. */
+function ScheduledWakeupBanner({
+  wakeAt,
+  reason,
+}: {
+  wakeAt: string;
+  reason: string | null;
+}) {
+  const targetMs = Date.parse(wakeAt);
+  const [now, setNow] = useState(() => Date.now());
+  const elapsed = !Number.isFinite(targetMs) || targetMs <= now;
+  useEffect(() => {
+    if (elapsed) return;
+    const id = setInterval(() => setNow(Date.now()), 1000);
+    return () => clearInterval(id);
+  }, [elapsed]);
+  if (!Number.isFinite(targetMs)) return null;
+  const remaining = Math.max(0, Math.floor((targetMs - now) / 1000));
+  const wakeDate = new Date(targetMs);
+  const clock = `${String(wakeDate.getHours()).padStart(2, "0")}:${String(
+    wakeDate.getMinutes(),
+  ).padStart(2, "0")}`;
+  let label: string;
+  if (elapsed) {
+    label = "Waking…";
+  } else if (remaining < 60) {
+    label = `Asleep until ${clock} (in ${remaining}s)`;
+  } else if (remaining < 3600) {
+    const m = Math.floor(remaining / 60);
+    const s = remaining % 60;
+    label = `Asleep until ${clock} (in ${m}m ${String(s).padStart(2, "0")}s)`;
+  } else {
+    const h = Math.floor(remaining / 3600);
+    const m = Math.floor((remaining % 3600) / 60);
+    label = `Asleep until ${clock} (in ${h}h ${m}m)`;
+  }
+  return (
+    <div className="flex items-center gap-2 border-b border-sky-900/60 bg-sky-950/40 px-4 py-2 text-xs text-sky-200">
+      <span aria-hidden className="text-base leading-none">
+        ⏰
+      </span>
+      <span className="truncate">
+        {label}
+        {reason ? (
+          <span className="text-sky-300/70">: {reason}</span>
+        ) : null}
+      </span>
+    </div>
+  );
+}
+
 function WorkerStoppedBanner({ sessionId }: { sessionId: string }) {
   const [retryState, setRetryState] = useState<
     "idle" | "retrying" | "ok" | "failed"
@@ -765,6 +988,15 @@ function StartupErrorBanner({
 }) {
   const isAuth = /authentic|login|api[_ -]?key/i.test(message);
   const isCapacity = /capacity full|max_concurrent_workers/i.test(message);
+  // Match the exact `Display` of `AcpError::ProjectPathMissing`.
+  // Capture the path so the banner can echo it back to the user; the
+  // path lets them spot whether a rename or a delete is the cause and
+  // jump straight to the right fix. See #1089.
+  const projectPathMissingMatch = /project path no longer exists:\s*(\S.*)$/im.exec(
+    message,
+  );
+  const isProjectPathMissing = projectPathMissingMatch !== null;
+  const missingPath = projectPathMissingMatch?.[1]?.trim() ?? null;
   const [retryState, setRetryState] = useState<
     "idle" | "retrying" | "ok" | "failed"
   >("idle");
@@ -847,6 +1079,36 @@ function StartupErrorBanner({
             or switching one to the tmux substrate. Reinstalling the adapter
             won't help; the adapter is fine, the cap is the limit.
           </>
+        ) : isProjectPathMissing ? (
+          <>
+            The session's working directory no longer exists on disk:
+            {missingPath && (
+              <pre className="mt-1 whitespace-pre-wrap break-all rounded bg-rose-900/40 p-2 text-xs">
+                {missingPath}
+              </pre>
+            )}
+            Reinstalling the adapter won't help; the adapter is fine, the cwd
+            is gone. Two paths forward:
+            <ol className="mt-1 list-decimal space-y-0.5 pl-5">
+              <li>
+                Restore the directory at the path above (e.g.{" "}
+                <code className="rounded bg-rose-900/60 px-1">git worktree move</code>{" "}
+                it back, or recreate it), then click <strong>Retry</strong>.
+              </li>
+              <li>
+                Stop <code className="rounded bg-rose-900/60 px-1">aoe serve</code>,
+                edit{" "}
+                <code className="rounded bg-rose-900/60 px-1">project_path</code>{" "}
+                for this session in{" "}
+                <code className="rounded bg-rose-900/60 px-1">
+                  ~/.agent-of-empires/profiles/&lt;profile&gt;/sessions.json
+                </code>
+                {" "}to point at the new location, then start{" "}
+                <code className="rounded bg-rose-900/60 px-1">aoe serve</code>{" "}
+                again.
+              </li>
+            </ol>
+          </>
         ) : (
           <>
             Run <code className="rounded bg-rose-900/60 px-1">aoe cockpit doctor --fix</code>{" "}
@@ -858,5 +1120,156 @@ function StartupErrorBanner({
         )}
       </div>
     </div>
+  );
+}
+
+/* ── Queued prompts strip ─────────────────────────────────────────── */
+
+interface QueuedPromptsStripProps {
+  queued: QueuedPrompt[];
+  onRemove: (id: string) => void;
+  onEdit: (id: string, text: string) => void;
+  onClear: () => void;
+}
+
+/** Strip rendered above the composer listing prompts the user has
+ *  queued mid-turn. Each row is editable in place (click to edit, save
+ *  on Enter or blur, cancel on Escape) and removable via the X button.
+ *  Hidden when the queue is empty. See #1031. */
+function QueuedPromptsStrip({
+  queued,
+  onRemove,
+  onEdit,
+  onClear,
+}: QueuedPromptsStripProps) {
+  if (queued.length === 0) return null;
+  return (
+    <div className="border-t border-surface-800 bg-surface-900/60 px-4 py-2">
+      <div className="mx-auto max-w-3xl xl:max-w-4xl 2xl:max-w-5xl">
+        <div className="flex items-center justify-between pb-1.5 text-[11px] uppercase tracking-wider text-text-dim">
+          <span className="inline-flex items-center gap-1">
+            <Clock className="h-3 w-3" />
+            Queued ({queued.length})
+          </span>
+          {queued.length > 1 && (
+            <button
+              type="button"
+              onClick={onClear}
+              className="text-text-dim hover:text-rose-300 transition-colors"
+            >
+              Clear all
+            </button>
+          )}
+        </div>
+        <ul className="flex flex-col gap-1.5">
+          {queued.map((q) => (
+            <QueuedPromptRow
+              key={q.id}
+              prompt={q}
+              onRemove={() => onRemove(q.id)}
+              onEdit={(text) => onEdit(q.id, text)}
+            />
+          ))}
+        </ul>
+      </div>
+    </div>
+  );
+}
+
+function QueuedPromptRow({
+  prompt,
+  onRemove,
+  onEdit,
+}: {
+  prompt: QueuedPrompt;
+  onRemove: () => void;
+  onEdit: (text: string) => void;
+}) {
+  // Editor state co-mounts with the textarea: when `editing` flips on
+  // we re-key <QueuedPromptEditor> so it initialises `draft` from the
+  // current prompt.text. This avoids a setState-in-effect to keep the
+  // draft synced with external edits (lint: react-hooks/set-state-in-effect).
+  const [editing, setEditing] = useState(false);
+
+  return (
+    <li className="group flex items-start gap-2 rounded-lg border border-amber-700/30 bg-amber-950/15 px-2.5 py-1.5">
+      <span className="mt-0.5 inline-flex h-4 w-4 shrink-0 items-center justify-center rounded-full bg-amber-500/20 text-[10px] font-semibold text-amber-300">
+        ⏱
+      </span>
+      {editing ? (
+        <QueuedPromptEditor
+          key={prompt.id}
+          initial={prompt.text}
+          onCancel={() => setEditing(false)}
+          onSave={(text) => {
+            const trimmed = text.trim();
+            if (trimmed && trimmed !== prompt.text) onEdit(trimmed);
+            setEditing(false);
+          }}
+        />
+      ) : (
+        <button
+          type="button"
+          onClick={() => setEditing(true)}
+          title="Click to edit"
+          className="min-w-0 flex-1 text-left text-xs leading-5 text-text-secondary whitespace-pre-wrap break-words hover:text-text-primary"
+        >
+          {prompt.text}
+        </button>
+      )}
+      <button
+        type="button"
+        onClick={onRemove}
+        title="Drop this queued message"
+        className="shrink-0 rounded p-1 text-text-dim hover:bg-surface-800 hover:text-rose-300"
+      >
+        <X className="h-3.5 w-3.5" />
+      </button>
+    </li>
+  );
+}
+
+function QueuedPromptEditor({
+  initial,
+  onCancel,
+  onSave,
+}: {
+  initial: string;
+  onCancel: () => void;
+  onSave: (text: string) => void;
+}) {
+  const [draft, setDraft] = useState(initial);
+  return (
+    <>
+      <textarea
+        autoFocus
+        value={draft}
+        onChange={(e) => setDraft(e.target.value)}
+        onBlur={() => onSave(draft)}
+        onKeyDown={(e) => {
+          if (e.key === "Enter" && !e.shiftKey) {
+            e.preventDefault();
+            onSave(draft);
+          } else if (e.key === "Escape") {
+            e.preventDefault();
+            onCancel();
+          }
+        }}
+        rows={Math.min(6, Math.max(1, draft.split("\n").length))}
+        className={[
+          "min-w-0 flex-1 resize-none bg-transparent text-xs leading-5",
+          "text-text-primary outline-none placeholder:text-text-dim",
+        ].join(" ")}
+      />
+      <button
+        type="button"
+        onMouseDown={(e) => e.preventDefault()}
+        onClick={() => onSave(draft)}
+        title="Save (Enter)"
+        className="shrink-0 rounded p-1 text-text-dim hover:bg-surface-800 hover:text-emerald-300"
+      >
+        <Check className="h-3.5 w-3.5" />
+      </button>
+    </>
   );
 }

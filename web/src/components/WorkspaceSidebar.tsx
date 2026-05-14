@@ -151,6 +151,56 @@ function PlanProgressMini({
   );
 }
 
+/** Sidebar chip that ticks down to a `ScheduleWakeup` fire time. Self-
+ *  destructs when the wake passes (sets local count to 0 and renders
+ *  "waking…"; the next sessions-endpoint refresh removes the underlying
+ *  field). 1Hz timer is local to the row so we don't fan out a global
+ *  tick across the sidebar. See #1091. */
+function WakeupCountdown({
+  wakeAt,
+  reason,
+}: {
+  wakeAt: string;
+  reason: string | null | undefined;
+}) {
+  const targetMs = Date.parse(wakeAt);
+  const [now, setNow] = useState(() => Date.now());
+  const elapsed = !Number.isFinite(targetMs) || targetMs <= now;
+  useEffect(() => {
+    if (elapsed) return;
+    const id = setInterval(() => setNow(Date.now()), 1000);
+    return () => clearInterval(id);
+  }, [elapsed]);
+  if (!Number.isFinite(targetMs)) return null;
+  const remaining = Math.max(0, Math.floor((targetMs - now) / 1000));
+  const label = elapsed ? "waking…" : `in ${formatDurationSecondsShort(remaining)}`;
+  const title = reason
+    ? `Scheduled wakeup: ${reason}`
+    : "Scheduled wakeup";
+  return (
+    <span
+      title={title}
+      aria-label={`Scheduled wakeup ${label}`}
+      className="inline-flex shrink-0 items-center gap-0.5 rounded border border-sky-700/40 bg-sky-950/30 px-1 py-0 text-[10px] font-medium text-sky-300"
+    >
+      <span aria-hidden="true">⏰</span>
+      {label}
+    </span>
+  );
+}
+
+/** Compact duration formatting used by the wakeup chip: `45s`, `3m`,
+ *  `1h 7m`. Drops sub-minute resolution above one minute since the chip
+ *  is read at a glance. */
+function formatDurationSecondsShort(seconds: number): string {
+  if (seconds < 60) return `${seconds}s`;
+  const m = Math.floor(seconds / 60);
+  if (m < 60) return `${m}m`;
+  const h = Math.floor(m / 60);
+  const remM = m % 60;
+  return remM === 0 ? `${h}h` : `${h}h ${remM}m`;
+}
+
 function isPlainLeftClick(event: React.MouseEvent<HTMLAnchorElement>): boolean {
   return (
     event.button === 0 &&
@@ -196,12 +246,16 @@ const SessionRow = memo(function SessionRow({
   const singleSession = workspace.sessions.length === 1;
   const sessionTitle = firstSession?.title.trim() ?? "";
   const branchLabel = workspace.branch ?? null;
+  const baseBranch = firstSession?.base_branch ?? null;
   const label = singleSession
     ? sessionTitle || branchLabel || "default"
     : branchLabel || sessionTitle || "default";
   const subtitle = singleSession && sessionTitle && branchLabel && sessionTitle !== branchLabel
     ? branchLabel
     : null;
+  const subtitleTitle = subtitle && baseBranch
+    ? `${subtitle} (based on ${baseBranch})`
+    : subtitle;
   const sessionId = firstSession?.id;
   const navigationSessionId = runningSession?.id ?? firstSession?.id ?? null;
   const sessionPath = navigationSessionId
@@ -404,10 +458,33 @@ const SessionRow = memo(function SessionRow({
                   <Pencil className="h-3 w-3 text-amber-400/90" />
                 </span>
               )}
+              {firstSession?.cockpit_mode &&
+                firstSession.cockpit_worker_state === "resuming" && (
+                  <span
+                    title="Cockpit worker is resuming"
+                    aria-label="Resuming"
+                    className="inline-flex shrink-0 items-center gap-0.5 rounded border border-amber-700/40 bg-amber-950/30 px-1 py-0 text-[10px] font-medium text-amber-300"
+                  >
+                    <span className="inline-block h-1.5 w-1.5 animate-pulse rounded-full bg-amber-400/80" />
+                    Resuming
+                  </span>
+                )}
+              {firstSession?.next_wakeup_at && (
+                <WakeupCountdown
+                  wakeAt={firstSession.next_wakeup_at}
+                  reason={firstSession.next_wakeup_reason}
+                />
+              )}
             </span>
             {subtitle && (
-              <span className="block text-[11px] font-mono text-text-dim truncate" title={subtitle}>
+              <span
+                className="block text-[11px] font-mono text-text-dim truncate"
+                title={subtitleTitle ?? subtitle}
+              >
                 {subtitle}
+                {baseBranch && (
+                  <span className="ml-1 text-text-dim/70">← {baseBranch}</span>
+                )}
               </span>
             )}
             {firstSession?.plan_summary && firstSession.plan_summary.total > 0 && (

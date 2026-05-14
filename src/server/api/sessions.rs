@@ -10,7 +10,7 @@ use axum::{
 };
 use serde::{Deserialize, Serialize};
 
-use crate::session::{Instance, Status, Storage};
+use crate::session::{EnsureReadyError, EnsureReadyOutcome, Instance, Status, Storage};
 
 use super::validate_no_shell_injection;
 use super::AppState;
@@ -34,6 +34,11 @@ pub struct SessionResponse {
     pub last_error: Option<String>,
     pub branch: Option<String>,
     pub main_repo_path: Option<String>,
+    /// Base branch the worktree was created from when AoE managed the
+    /// creation. None for sessions attached to a pre-existing branch,
+    /// or those that took the repo's default branch. See #948.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub base_branch: Option<String>,
     pub is_sandboxed: bool,
     pub has_managed_worktree: bool,
     pub has_terminal: bool,
@@ -51,6 +56,14 @@ pub struct SessionResponse {
     /// between the cockpit panels and the terminal view.
     #[cfg(feature = "serve")]
     pub cockpit_mode: bool,
+    /// Live cockpit worker lifecycle. `absent` for tmux sessions or
+    /// cockpit sessions whose worker has not been spawned/attached
+    /// yet; `resuming` while the reconciler is mid-spawn or mid-attach;
+    /// `running` once the supervisor holds a live worker. Drives the
+    /// sidebar `Resuming…` chip and the per-session banner in the
+    /// cockpit view. See #1088.
+    #[cfg(feature = "serve")]
+    pub cockpit_worker_state: crate::cockpit::supervisor::CockpitWorkerState,
     /// True when the session is a Claude Code session AND the user has
     /// enabled Claude's fullscreen renderer (`tui: "fullscreen"` in
     /// `~/.claude/settings.json`). The web client uses this to skip
@@ -73,6 +86,19 @@ pub struct SessionResponse {
     /// bridge in `acp_client::map_update_to_events`). See #1061.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub plan_summary: Option<PlanSummary>,
+    /// Absolute RFC3339 timestamp at which the cockpit session's
+    /// `ScheduleWakeup` tool will fire (i.e. the next turn is expected
+    /// to start). Cleared once a `UserPromptSent` lands after the
+    /// scheduling tool call; the /loop skill's self-firing emits that
+    /// prompt at wake time, so a wakeup whose seq is ≤ the latest
+    /// prompt has already fired. See #1091.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub next_wakeup_at: Option<String>,
+    /// User-facing reason the agent gave when scheduling the wakeup,
+    /// shown alongside the countdown chip / banner. Only set when
+    /// `next_wakeup_at` is also set. See #1091.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub next_wakeup_reason: Option<String>,
 }
 
 #[derive(Serialize, Clone, Debug)]
@@ -108,7 +134,15 @@ impl SessionResponse {
     /// request via `crate::claude_settings::read_tui_fullscreen()`); it
     /// surfaces on the response only when the session's agent is Claude.
     pub fn from_instance(inst: &Instance, claude_fullscreen: bool) -> Self {
-        Self::from_instance_with_plan(inst, claude_fullscreen, None)
+        Self::from_instance_with_plan(
+            inst,
+            claude_fullscreen,
+            None,
+            #[cfg(feature = "serve")]
+            crate::cockpit::supervisor::CockpitWorkerState::Absent,
+            None,
+            None,
+        )
     }
 
     /// Build a response with the per-session plan snapshot. Called from
@@ -118,6 +152,10 @@ impl SessionResponse {
         inst: &Instance,
         claude_fullscreen: bool,
         plan_summary: Option<PlanSummary>,
+        #[cfg(feature = "serve")]
+        cockpit_worker_state: crate::cockpit::supervisor::CockpitWorkerState,
+        next_wakeup_at: Option<String>,
+        next_wakeup_reason: Option<String>,
     ) -> Self {
         Self {
             id: inst.id.clone(),
@@ -136,6 +174,10 @@ impl SessionResponse {
                 .worktree_info
                 .as_ref()
                 .map(|w| w.main_repo_path.clone()),
+            base_branch: inst
+                .worktree_info
+                .as_ref()
+                .and_then(|w| w.base_branch.clone()),
             is_sandboxed: inst.is_sandboxed(),
             has_managed_worktree: inst
                 .worktree_info
@@ -154,6 +196,8 @@ impl SessionResponse {
             notify_on_error: inst.notify_on_error,
             #[cfg(feature = "serve")]
             cockpit_mode: inst.cockpit_mode,
+            #[cfg(feature = "serve")]
+            cockpit_worker_state,
             claude_fullscreen: claude_fullscreen && inst.tool == "claude",
             workspace_repos: inst
                 .workspace_info
@@ -171,6 +215,8 @@ impl SessionResponse {
                 .unwrap_or_default(),
             warnings: Vec::new(),
             plan_summary,
+            next_wakeup_at,
+            next_wakeup_reason,
         }
     }
 }
@@ -210,6 +256,10 @@ fn truncate_title(s: &str, max: usize) -> String {
 pub async fn list_sessions(State(state): State<Arc<AppState>>) -> Json<Vec<SessionResponse>> {
     let instances = state.instances.read().await;
     let claude_fullscreen = crate::claude_settings::read_tui_fullscreen();
+    // Snapshot the supervisor's worker lifecycle map once per request
+    // rather than locking it per row. See #1088.
+    #[cfg(feature = "serve")]
+    let worker_states = state.cockpit_supervisor.worker_states_snapshot().await;
     let mut sessions: Vec<SessionResponse> = instances
         .iter()
         .map(|inst| {
@@ -221,7 +271,28 @@ pub async fn list_sessions(State(state): State<Arc<AppState>>) -> Json<Vec<Sessi
             } else {
                 None
             };
-            SessionResponse::from_instance_with_plan(inst, claude_fullscreen, plan_summary)
+            let (next_wakeup_at, next_wakeup_reason) = if inst.cockpit_mode {
+                match state.cockpit_event_store.latest_pending_wakeup(&inst.id) {
+                    Some((at, reason)) => (Some(at.to_rfc3339()), reason),
+                    None => (None, None),
+                }
+            } else {
+                (None, None)
+            };
+            #[cfg(feature = "serve")]
+            let cockpit_worker_state = worker_states
+                .get(&inst.id)
+                .copied()
+                .unwrap_or(crate::cockpit::supervisor::CockpitWorkerState::Absent);
+            SessionResponse::from_instance_with_plan(
+                inst,
+                claude_fullscreen,
+                plan_summary,
+                #[cfg(feature = "serve")]
+                cockpit_worker_state,
+                next_wakeup_at,
+                next_wakeup_reason,
+            )
         })
         .collect();
 
@@ -623,6 +694,12 @@ pub struct CreateSessionBody {
     pub worktree_branch: Option<String>,
     #[serde(default)]
     pub create_new_branch: bool,
+    /// Branch the new worktree branch is based on. Only honored when
+    /// `create_new_branch` is true; the server ignores it otherwise.
+    /// `None` (or empty) falls back to the repository's detected
+    /// default branch. See #948.
+    #[serde(default)]
+    pub base_branch: Option<String>,
     #[serde(default)]
     pub sandbox: bool,
     #[serde(default)]
@@ -640,12 +717,11 @@ pub struct CreateSessionBody {
     pub profile: Option<String>,
     /// Whether the new session should run in cockpit mode. The
     /// bundled wizard always sends an explicit value (true for ACP-
-    /// capable tools when the server has `AOE_EXPERIMENTAL_COCKPIT`
-    /// set, false otherwise); other API callers may omit the field,
-    /// in which case it defaults to false. Either way the value is
-    /// re-gated by `allow_cockpit` below before being persisted, so
-    /// a tampered request can't escalate cockpit on past the env-
-    /// var, master-switch, or no-cockpit gates.
+    /// capable tools when the master switch is on, false otherwise);
+    /// other API callers may omit the field, in which case it
+    /// defaults to false. Either way the value is re-gated by the
+    /// master switch below before being persisted, so a tampered
+    /// request can't escalate cockpit on past the master switch.
     #[cfg(feature = "serve")]
     #[serde(default)]
     pub cockpit_mode: bool,
@@ -791,6 +867,14 @@ pub async fn create_session(
             worktree_enabled: worktree_branch.is_some(),
             worktree_branch,
             create_new_branch: body.create_new_branch,
+            base_branch: if body.create_new_branch {
+                body.base_branch
+                    .as_ref()
+                    .map(|s| s.trim().to_string())
+                    .filter(|s| !s.is_empty())
+            } else {
+                None
+            },
             sandbox: body.sandbox,
             sandbox_image,
             yolo_mode: body.yolo_mode,
@@ -813,14 +897,11 @@ pub async fn create_session(
         }
 
         // Apply cockpit fields from the request body. cockpit_mode is
-        // silently downgraded to tmux when either gate says no:
-        // `cockpit.enabled = false` in config.toml (persistent master),
-        // or `AOE_EXPERIMENTAL_COCKPIT` not set (per-process opt-in for
-        // new sessions).
+        // silently downgraded to tmux when the master switch is off
+        // (`cockpit.enabled = false` in config.toml).
         #[cfg(feature = "serve")]
         {
-            let allow_cockpit = cockpit_master_enabled && crate::cockpit::experimental_enabled();
-            instance.cockpit_mode = body.cockpit_mode && allow_cockpit;
+            instance.cockpit_mode = body.cockpit_mode && cockpit_master_enabled;
             instance.cockpit_agent = body.cockpit_agent;
             instance.cockpit_model = body.cockpit_model;
         }
@@ -1317,12 +1398,31 @@ pub struct RichDiffFileInfo {
     pub status: String,
     pub additions: usize,
     pub deletions: usize,
+    /// Name of the workspace repo this file belongs to. None for
+    /// single-repo (non-workspace) sessions. The frontend uses this to
+    /// group entries in the sidebar diff list and to disambiguate
+    /// path collisions across repos. See #1047.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub repo_name: Option<String>,
+}
+
+#[derive(Serialize)]
+pub struct RepoBase {
+    /// None for single-repo sessions; Some for each workspace member.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub repo_name: Option<String>,
+    pub base_branch: String,
 }
 
 #[derive(Serialize)]
 pub struct RichDiffFilesResponse {
     pub files: Vec<RichDiffFileInfo>,
-    pub base_branch: String,
+    /// One entry per repo whose diff was computed. Single-repo
+    /// sessions get a one-element array with `repo_name: None`;
+    /// workspace sessions get one entry per workspace member. Replaces
+    /// the previous single-string `base_branch` since each member can
+    /// have a different default. See #1047.
+    pub per_repo_bases: Vec<RepoBase>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub warning: Option<String>,
 }
@@ -1419,19 +1519,47 @@ fn validate_diff_path(
     Ok(final_path)
 }
 
-/// Helper: look up a session's project_path by ID.
-async fn resolve_session_path(
+/// One repo's worth of diff context: a name (for workspace members)
+/// and the filesystem path the diff helper walks. See #1047.
+#[derive(Clone, Debug)]
+struct DiffRepo {
+    /// Workspace member name, or None for single-repo sessions.
+    name: Option<String>,
+    path: String,
+}
+
+/// Expand a session into the list of repos whose diffs the sidebar
+/// cares about. Workspace sessions iterate `workspace_info.repos`
+/// (each `worktree_path` becomes one entry); single-repo sessions
+/// fall back to a one-element list of `[project_path]` so the
+/// existing flow is unchanged. See #1047.
+async fn resolve_diff_repos(
     state: &AppState,
     id: &str,
-) -> Result<String, axum::response::Response> {
+) -> Result<Vec<DiffRepo>, axum::response::Response> {
     let instances = state.instances.read().await;
-    match instances.iter().find(|i| i.id == id) {
-        Some(i) => Ok(i.project_path.clone()),
-        None => Err((
+    let inst = instances.iter().find(|i| i.id == id).ok_or_else(|| {
+        (
             StatusCode::NOT_FOUND,
             Json(serde_json::json!({"error": "not_found", "message": "Session not found"})),
         )
-            .into_response()),
+            .into_response()
+    })?;
+    if let Some(ws) = inst.workspace_info.as_ref() {
+        let repos = ws
+            .repos
+            .iter()
+            .map(|r| DiffRepo {
+                name: Some(r.name.clone()),
+                path: r.worktree_path.clone(),
+            })
+            .collect();
+        Ok(repos)
+    } else {
+        Ok(vec![DiffRepo {
+            name: None,
+            path: inst.project_path.clone(),
+        }])
     }
 }
 
@@ -1439,34 +1567,54 @@ pub async fn session_diff_files(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
 ) -> impl IntoResponse {
-    let project_path = match resolve_session_path(&state, &id).await {
-        Ok(p) => p,
+    let repos = match resolve_diff_repos(&state, &id).await {
+        Ok(r) => r,
         Err(resp) => return resp,
     };
 
     let result = tokio::task::spawn_blocking(move || {
         use crate::git::diff;
-        let path = std::path::Path::new(&project_path);
 
-        let base_branch = diff::get_default_branch(path).unwrap_or_else(|_| "main".to_string());
-        let warning = diff::check_merge_base_status(path, &base_branch);
-        let changed = diff::compute_changed_files(path, &base_branch).unwrap_or_default();
+        let mut all_files: Vec<RichDiffFileInfo> = Vec::new();
+        let mut per_repo_bases: Vec<RepoBase> = Vec::new();
+        let mut warnings: Vec<String> = Vec::new();
 
-        let files: Vec<RichDiffFileInfo> = changed
-            .into_iter()
-            .map(|f| RichDiffFileInfo {
-                path: f.path.to_string_lossy().to_string(),
-                old_path: f.old_path.map(|p| p.to_string_lossy().to_string()),
-                status: f.status.label().to_string(),
-                additions: f.additions,
-                deletions: f.deletions,
-            })
-            .collect();
+        for repo in &repos {
+            let path = std::path::Path::new(&repo.path);
+            let base_branch = diff::get_default_branch(path).unwrap_or_else(|_| "main".to_string());
+            let warning = diff::check_merge_base_status(path, &base_branch);
+            let changed = diff::compute_changed_files(path, &base_branch).unwrap_or_default();
+
+            for f in changed {
+                all_files.push(RichDiffFileInfo {
+                    path: f.path.to_string_lossy().to_string(),
+                    old_path: f.old_path.map(|p| p.to_string_lossy().to_string()),
+                    status: f.status.label().to_string(),
+                    additions: f.additions,
+                    deletions: f.deletions,
+                    repo_name: repo.name.clone(),
+                });
+            }
+            per_repo_bases.push(RepoBase {
+                repo_name: repo.name.clone(),
+                base_branch: base_branch.clone(),
+            });
+            if let Some(w) = warning {
+                match repo.name.as_deref() {
+                    Some(n) => warnings.push(format!("{n}: {w}")),
+                    None => warnings.push(w),
+                }
+            }
+        }
 
         RichDiffFilesResponse {
-            files,
-            base_branch,
-            warning,
+            files: all_files,
+            per_repo_bases,
+            warning: if warnings.is_empty() {
+                None
+            } else {
+                Some(warnings.join("\n"))
+            },
         }
     })
     .await;
@@ -1491,6 +1639,12 @@ pub async fn session_diff_files(
 #[derive(Deserialize)]
 pub struct FileDiffQuery {
     pub path: String,
+    /// Workspace repo name when the session is a multi-repo workspace.
+    /// Omitted for single-repo sessions; if a workspace session omits
+    /// it, the handler defaults to the first member so the legacy
+    /// single-repo URL keeps working for the primary repo. See #1047.
+    #[serde(default)]
+    pub repo: Option<String>,
 }
 
 /// Response for a rejected diff request (bad path, file not changed, etc.).
@@ -1505,10 +1659,38 @@ pub async fn session_diff_file(
     Path(id): Path<String>,
     axum::extract::Query(query): axum::extract::Query<FileDiffQuery>,
 ) -> impl IntoResponse {
-    let project_path = match resolve_session_path(&state, &id).await {
-        Ok(p) => p,
+    let repos = match resolve_diff_repos(&state, &id).await {
+        Ok(r) => r,
         Err(resp) => return resp,
     };
+
+    // Pick the workspace member named in `?repo=`. When the param is
+    // missing we default to the first member, which matches the
+    // legacy single-repo URL contract (`?path=...` against the
+    // session's primary repo). When the named repo doesn't exist, the
+    // request is rejected so a stale link doesn't quietly diff the
+    // wrong repo. See #1047.
+    let selected_repo = match query.repo.as_deref() {
+        Some(name) => match repos.iter().find(|r| r.name.as_deref() == Some(name)) {
+            Some(r) => r.clone(),
+            None => {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(serde_json::json!({
+                        "error": "bad_request",
+                        "message": "unknown workspace repo"
+                    })),
+                )
+                    .into_response();
+            }
+        },
+        None => repos
+            .first()
+            .cloned()
+            .expect("resolve_diff_repos always returns at least one entry (single-repo fallback)"),
+    };
+    let project_path = selected_repo.path;
+    let selected_repo_name = selected_repo.name;
 
     let result =
         tokio::task::spawn_blocking(move || -> Result<RichFileDiffResponse, DiffFileError> {
@@ -1549,6 +1731,7 @@ pub async fn session_diff_file(
                 status: file_diff.file.status.label().to_string(),
                 additions: file_diff.file.additions,
                 deletions: file_diff.file.deletions,
+                repo_name: selected_repo_name.clone(),
             };
 
             // Size cap: avoid OOM'ing the browser on huge files (minified bundles,
@@ -1696,12 +1879,36 @@ mod tests {
             main_repo_path: "/tmp/repo".to_string(),
             managed_by_aoe: true,
             created_at: chrono::Utc::now(),
+            base_branch: None,
         });
         assert_eq!(
             SessionResponse::from_instance(&inst, false)
                 .branch
                 .as_deref(),
             Some("feature/test")
+        );
+    }
+
+    #[test]
+    fn session_response_surfaces_base_branch_when_set() {
+        let mut inst = make_test_instance();
+        inst.worktree_info = Some(crate::session::WorktreeInfo {
+            branch: "feature/test".to_string(),
+            main_repo_path: "/tmp/repo".to_string(),
+            managed_by_aoe: true,
+            created_at: chrono::Utc::now(),
+            base_branch: Some("release-1.2".to_string()),
+        });
+        let resp = SessionResponse::from_instance(&inst, false);
+        assert_eq!(resp.base_branch.as_deref(), Some("release-1.2"));
+
+        // Field is omitted from the wire JSON when None so old clients
+        // don't see a flood of nulls.
+        inst.worktree_info.as_mut().unwrap().base_branch = None;
+        let json = serde_json::to_value(SessionResponse::from_instance(&inst, false)).unwrap();
+        assert!(
+            json.get("base_branch").is_none(),
+            "base_branch should be omitted when None, got: {json}"
         );
     }
 
@@ -1780,6 +1987,7 @@ mod tests {
             main_repo_path: "/tmp/repo".to_string(),
             managed_by_aoe: true,
             created_at: chrono::Utc::now(),
+            base_branch: None,
         });
 
         apply_session_title_rename(&mut inst, "Renamed Session".to_string());
@@ -2078,10 +2286,21 @@ mod tests {
 #[derive(Deserialize)]
 pub struct SendMessageRequest {
     pub message: String,
+    /// Whether to auto-revive a dead/stopped session before sending. Defaults
+    /// to `true`; set to `false` for fail-loud behavior (parity with the
+    /// `--no-revive` CLI flag).
+    #[serde(default = "default_revive")]
+    pub revive: bool,
+}
+
+fn default_revive() -> bool {
+    true
 }
 
 enum SendKeysError {
     NotRunning,
+    Transient(Status),
+    CockpitMode,
     Tmux(anyhow::Error),
 }
 
@@ -2125,25 +2344,49 @@ pub async fn send_message(
 
     let tool = instance.tool.clone();
     let message = req.message;
-    let send_result = tokio::task::spawn_blocking(move || -> Result<(), SendKeysError> {
-        let tmux_session = instance.tmux_session().map_err(SendKeysError::Tmux)?;
-        if !tmux_session.exists() {
-            return Err(SendKeysError::NotRunning);
-        }
-        let delay = crate::agents::send_keys_enter_delay(&tool);
-        tmux_session
-            .send_keys_with_delay(&message, delay)
-            .map_err(SendKeysError::Tmux)?;
-        Ok(())
-    })
+    let revive = req.revive;
+    let send_result = tokio::task::spawn_blocking(
+        move || -> Result<(EnsureReadyOutcome, Instance), SendKeysError> {
+            // Revive the pane before sending. Without this, a send to a dead
+            // pane silently writes keystrokes to a corpse with no agent.
+            // Skipped when the caller opts out via `revive: false`.
+            let mut inst_owned = instance;
+            let outcome = if revive {
+                inst_owned.ensure_pane_ready().map_err(|e| match e {
+                    EnsureReadyError::Transient(s) => SendKeysError::Transient(s),
+                    EnsureReadyError::CockpitMode => SendKeysError::CockpitMode,
+                    EnsureReadyError::Tmux(e) => SendKeysError::Tmux(e),
+                })?
+            } else {
+                EnsureReadyOutcome::AlreadyAlive
+            };
+            let tmux_session = inst_owned.tmux_session().map_err(SendKeysError::Tmux)?;
+            if !tmux_session.exists() {
+                return Err(SendKeysError::NotRunning);
+            }
+            let delay = crate::agents::send_keys_enter_delay(&tool);
+            tmux_session
+                .send_keys_with_delay(&message, delay)
+                .map_err(SendKeysError::Tmux)?;
+            Ok((outcome, inst_owned))
+        },
+    )
     .await;
 
     match send_result {
-        Ok(Ok(())) => {
-            // Stamp last_accessed_at so the activity column reflects API-driven
-            // interaction the same way TUI/web interaction does.
+        Ok(Ok((outcome, started))) => {
+            // ensure_pane_ready mutated `started` (status, agent_session_id,
+            // last_start_time, last_error) on the clone. Sync those back to
+            // the live entry so the next request sees a coherent view;
+            // without this, a rapid follow-up could generate a fresh
+            // `agent_session_id` and orphan the prior Claude conversation.
+            // See `apply_post_restart_sync`. Also stamp last_accessed_at so
+            // the activity column reflects API-driven interaction.
             let mut instances = state.instances.write().await;
             let profile = if let Some(i) = instances.iter_mut().find(|i| i.id == id) {
+                if !matches!(outcome, EnsureReadyOutcome::AlreadyAlive) {
+                    apply_post_restart_sync(i, &started);
+                }
                 i.touch_last_accessed();
                 i.source_profile.clone()
             } else {
@@ -2172,6 +2415,19 @@ pub async fn send_message(
         Ok(Err(SendKeysError::NotRunning)) => (
             StatusCode::CONFLICT,
             Json(serde_json::json!({"error": "session_not_running"})),
+        )
+            .into_response(),
+        Ok(Err(SendKeysError::Transient(status))) => (
+            StatusCode::CONFLICT,
+            Json(serde_json::json!({
+                "error": "session_transient",
+                "status": format!("{status:?}"),
+            })),
+        )
+            .into_response(),
+        Ok(Err(SendKeysError::CockpitMode)) => (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": "cockpit_mode_unsupported"})),
         )
             .into_response(),
         Ok(Err(SendKeysError::Tmux(e))) => {

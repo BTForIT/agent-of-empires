@@ -49,12 +49,66 @@ pub enum Status {
     Creating,
 }
 
+/// Outcome of `Instance::ensure_pane_ready`. Callers surface this so the user
+/// knows what (if anything) happened on their behalf before a send.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EnsureReadyOutcome {
+    /// Pane was already alive; no action taken.
+    AlreadyAlive,
+    /// Pane was dead (`#{pane_dead}=1`) and was respawned via the restart path.
+    Respawned,
+    /// Tmux session did not exist and was started from scratch.
+    Started,
+}
+
+/// Errors `ensure_pane_ready` can return. Separating transient lifecycle
+/// states from real tmux failures lets HTTP callers map them to 409 (retry)
+/// vs 500 (real failure) instead of lumping everything as a tmux error.
+#[derive(Debug)]
+pub enum EnsureReadyError {
+    /// Instance is mid-lifecycle (Creating/Deleting). Caller should retry.
+    Transient(Status),
+    /// Instance is cockpit-mode (no backing tmux pane); send is not supported.
+    CockpitMode,
+    /// Underlying tmux operation failed.
+    Tmux(anyhow::Error),
+}
+
+impl std::fmt::Display for EnsureReadyError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            EnsureReadyError::Transient(status) => {
+                write!(
+                    f,
+                    "Session is mid-lifecycle ({status:?}); cannot send right now"
+                )
+            }
+            EnsureReadyError::CockpitMode => write!(
+                f,
+                "Cockpit-mode sessions have no tmux pane; send is not supported"
+            ),
+            EnsureReadyError::Tmux(e) => write!(f, "{e}"),
+        }
+    }
+}
+
+impl std::error::Error for EnsureReadyError {}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WorktreeInfo {
     pub branch: String,
     pub main_repo_path: String,
     pub managed_by_aoe: bool,
     pub created_at: DateTime<Utc>,
+    /// Branch the worktree was created from when `managed_by_aoe` is
+    /// true. None means "the repo's default branch was used" (the
+    /// historical behavior before #948) or the worktree was attached
+    /// to a pre-existing branch (`create_branch = false`). Surfaced
+    /// in `aoe list --json`, the TUI preview, and the web sessions
+    /// API; not used by core logic, so old `sessions.json` files
+    /// deserialize without the field.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub base_branch: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -454,6 +508,13 @@ impl Instance {
     /// when `source_profile` was never populated (e.g. legacy callers).
     pub fn effective_profile(&self) -> String {
         super::config::effective_profile(&self.source_profile)
+    }
+
+    /// Resolve the effective `environment` list for this session's profile,
+    /// falling back to the global list when the profile has no override.
+    fn profile_host_environment(&self) -> Vec<String> {
+        let profile = self.effective_profile();
+        super::profile_config::resolve_config_or_warn(&profile).environment
     }
 
     pub fn is_sub_session(&self) -> bool {
@@ -1055,7 +1116,21 @@ impl Instance {
         }
 
         // Prepend AOE_INSTANCE_ID env var if this agent supports hooks.
-        let env_prefix = status_hook_env_prefix(&self.id, &self.tool, agent);
+        let mut env_prefix = status_hook_env_prefix(&self.id, &self.tool, agent);
+
+        // Profile-scoped host environment entries (KEY=value, KEY=$VAR,
+        // KEY=$$literal, or bare KEY for passthrough). Sandboxed sessions
+        // intentionally skip this injection because the entries are
+        // host-side; sandbox users should configure `sandbox.environment`
+        // for the in-container env list.
+        let host_env = self.profile_host_environment();
+        if !host_env.is_empty() {
+            env_prefix = format!(
+                "{}{}",
+                super::environment::host_environment_prefix(&host_env),
+                env_prefix
+            );
+        }
 
         if self.command.is_empty() {
             crate::agents::get_agent(&self.tool).map(|a| {
@@ -1391,11 +1466,118 @@ impl Instance {
         let session = self.tmux_session()?;
 
         if session.exists() {
+            // Dead-pane case: `remain-on-exit on` keeps the tmux session
+            // alive after the agent process exits, leaving a frozen pane.
+            // The plain kill-session + new-session flow can race against
+            // the session cache (kill_process_tree on a defunct pid
+            // stalls on macOS, and the subsequent kill can run while
+            // start's exists() check still sees the cached entry),
+            // leaving the dead pane in place. Respawning the pane into a
+            // shell first puts it back in a live state so the kill path
+            // proceeds cleanly. The kill below then sees a live pane and
+            // tears it down; start_with_size_opts recreates the session
+            // with the agent command.
+            if session.is_pane_dead() {
+                tracing::info!(
+                    "restart: pane dead for session {} (remain-on-exit), \
+                     respawning shell before recreate",
+                    session.name()
+                );
+                let shell = super::environment::user_shell();
+                if let Err(e) = session.respawn_dead_pane(&self.project_path, Some(&shell)) {
+                    tracing::warn!(
+                        "respawn_dead_pane failed for {}: {} -- falling back to kill+start",
+                        session.name(),
+                        e
+                    );
+                }
+            }
             session.kill()?;
             std::thread::sleep(std::time::Duration::from_millis(100));
         }
 
         self.start_with_size_opts(size, skip_on_launch)
+    }
+
+    /// Smart-send precondition: bring this session's tmux pane to a state
+    /// where `send_keys_with_delay` is safe.
+    ///
+    /// Without this, a send to a dead pane silently writes keystrokes to a
+    /// corpse with no agent to respond, and the user sees no error.
+    ///
+    /// Handles three states the caller would otherwise hit:
+    /// - Tmux session missing: start from scratch via `start_with_size`.
+    /// - Pane dead (`#{pane_dead}=1`): reuse the restart path (same path
+    ///   E/F5 uses; well-tested).
+    /// - Already alive: no-op.
+    ///
+    /// Bails on Creating/Deleting (transient lifecycle states) and on
+    /// cockpit-mode sessions (no backing tmux pane).
+    ///
+    /// On `Started` / `Respawned`, polls briefly so keystrokes don't race the
+    /// agent's startup splash. Best-effort: returns after the timeout even if
+    /// the pane is still settling.
+    ///
+    /// Note: callers that mutate a clone (e.g. inside `spawn_blocking`) must
+    /// sync the post-start state (`status`, `agent_session_id`,
+    /// `last_start_time`, `last_error`) back onto the in-memory entry, since
+    /// `finalize_launch` writes those fields and they would otherwise be
+    /// dropped with the clone. See `apply_post_restart_sync`.
+    pub fn ensure_pane_ready(&mut self) -> Result<EnsureReadyOutcome, EnsureReadyError> {
+        if matches!(self.status, Status::Creating | Status::Deleting) {
+            return Err(EnsureReadyError::Transient(self.status));
+        }
+        #[cfg(feature = "serve")]
+        if self.cockpit_mode {
+            return Err(EnsureReadyError::CockpitMode);
+        }
+        let session = self.tmux_session().map_err(EnsureReadyError::Tmux)?;
+        if !session.exists() {
+            self.start_with_size(None).map_err(EnsureReadyError::Tmux)?;
+            self.wait_for_pane_ready(&session);
+            return Ok(EnsureReadyOutcome::Started);
+        }
+        if session.is_pane_dead() {
+            self.restart_with_size(None)
+                .map_err(EnsureReadyError::Tmux)?;
+            self.wait_for_pane_ready(&session);
+            return Ok(EnsureReadyOutcome::Respawned);
+        }
+        Ok(EnsureReadyOutcome::AlreadyAlive)
+    }
+
+    /// Best-effort wait for a freshly-started pane to settle past its initial
+    /// shell/splash so subsequent `send-keys` land in the agent instead of a
+    /// boot prompt. Polls up to 3s in 50ms increments; returns even on
+    /// timeout so a sluggish agent doesn't block the send indefinitely.
+    ///
+    /// Readiness signal:
+    /// - Agents that expect a shell, run a custom command override, or have
+    ///   an active hook status file: just wait for the pane to not be dead.
+    ///   Wrapper scripts look like shells to tmux, so `is_pane_running_shell`
+    ///   would never clear for them and we would eat the full 3s every time.
+    ///   This mirrors the same guard chain `ensure_session` uses.
+    /// - Real agents (e.g. claude, opencode): also wait for the pane to no
+    ///   longer be running a shell, so a keystroke doesn't land in the boot
+    ///   prompt that runs before the agent binary takes over.
+    fn wait_for_pane_ready(&self, session: &tmux::Session) {
+        let shell_check_unreliable = self.expects_shell()
+            || self.has_command_override()
+            || crate::hooks::read_hook_status(&self.id).is_some();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_millis(3000);
+        loop {
+            if !session.exists() {
+                return;
+            }
+            let pane_alive = !session.is_pane_dead();
+            if pane_alive && (shell_check_unreliable || !session.is_pane_running_shell()) {
+                return;
+            }
+            if std::time::Instant::now() >= deadline {
+                return;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
     }
 
     pub fn kill(&self) -> Result<()> {
@@ -1841,6 +2023,89 @@ mod tests {
     }
 
     #[test]
+    fn test_ensure_pane_ready_bails_on_creating() {
+        let mut inst = Instance::new("test", "/tmp/test");
+        inst.status = Status::Creating;
+        match inst.ensure_pane_ready() {
+            Err(EnsureReadyError::Transient(Status::Creating)) => {}
+            other => panic!("expected Transient(Creating), got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_ensure_pane_ready_bails_on_deleting() {
+        let mut inst = Instance::new("test", "/tmp/test");
+        inst.status = Status::Deleting;
+        match inst.ensure_pane_ready() {
+            Err(EnsureReadyError::Transient(Status::Deleting)) => {}
+            other => panic!("expected Transient(Deleting), got {other:?}"),
+        }
+    }
+
+    #[cfg(feature = "serve")]
+    #[test]
+    fn test_ensure_pane_ready_bails_on_cockpit_mode() {
+        let mut inst = Instance::new("test", "/tmp/test");
+        inst.cockpit_mode = true;
+        match inst.ensure_pane_ready() {
+            Err(EnsureReadyError::CockpitMode) => {}
+            other => panic!("expected CockpitMode, got {other:?}"),
+        }
+    }
+
+    /// Real-tmux integration: an alive pane yields AlreadyAlive with no
+    /// status/start_time mutations. Skipped if tmux isn't installed.
+    #[test]
+    fn test_ensure_pane_ready_alive_pane_is_noop() {
+        if std::process::Command::new("tmux")
+            .arg("-V")
+            .output()
+            .is_err()
+        {
+            eprintln!("tmux not available; skipping");
+            return;
+        }
+
+        let mut inst = Instance::new("ensure_alive_test", "/tmp/test");
+        let tmux_name = crate::tmux::Session::generate_name(&inst.id, &inst.title);
+        let _ = std::process::Command::new("tmux")
+            .args(["kill-session", "-t", &tmux_name])
+            .output();
+        let created = std::process::Command::new("tmux")
+            .args([
+                "new-session",
+                "-d",
+                "-s",
+                &tmux_name,
+                "-x",
+                "80",
+                "-y",
+                "24",
+                "sleep",
+                "60",
+            ])
+            .status();
+        if !created.map(|s| s.success()).unwrap_or(false) {
+            eprintln!("tmux new-session failed; skipping");
+            return;
+        }
+        crate::tmux::refresh_session_cache();
+
+        inst.status = Status::Running;
+        let prev_start = inst.last_start_time;
+        let prev_status = inst.status;
+
+        let outcome = inst.ensure_pane_ready().expect("ensure_pane_ready ok");
+        assert_eq!(outcome, EnsureReadyOutcome::AlreadyAlive);
+        assert_eq!(inst.last_start_time, prev_start);
+        assert_eq!(inst.status, prev_status);
+
+        let _ = std::process::Command::new("tmux")
+            .args(["kill-session", "-t", &tmux_name])
+            .output();
+    }
+
+    #[test]
     fn test_idle_age_returns_none_for_non_idle() {
         let mut inst = Instance::new("test", "/tmp/test");
         inst.status = Status::Running;
@@ -2173,6 +2438,7 @@ mod tests {
             main_repo_path: "/home/user/repo".to_string(),
             managed_by_aoe: true,
             created_at: Utc::now(),
+            base_branch: None,
         };
 
         let json = serde_json::to_string(&info).unwrap();
@@ -2281,6 +2547,7 @@ mod tests {
             main_repo_path: "/tmp/main".to_string(),
             managed_by_aoe: true,
             created_at: Utc::now(),
+            base_branch: None,
         });
 
         let json = serde_json::to_string(&inst).unwrap();

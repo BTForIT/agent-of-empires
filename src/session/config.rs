@@ -48,6 +48,20 @@ pub struct Config {
 
     #[serde(default)]
     pub cockpit: CockpitConfig,
+
+    /// Environment variables injected into the host command line for every
+    /// session spawned at global scope. Entries are `KEY=value`, `KEY=$VAR`
+    /// (read VAR from the host env), `KEY=$$literal` (escape a `$`), or
+    /// bare `KEY` (passthrough from the host env). Values are passed through
+    /// verbatim; `~` is not expanded, use an absolute path. Profiles can
+    /// replace this list via their own `environment` field. Sandboxed
+    /// sessions ignore this list; configure `sandbox.environment` instead.
+    #[serde(
+        default,
+        skip_serializing_if = "Vec::is_empty",
+        deserialize_with = "super::serde_helpers::string_or_vec"
+    )]
+    pub environment: Vec<String>,
 }
 
 /// Configuration for the cockpit (ACP-based native rendering of agent
@@ -90,6 +104,61 @@ pub struct CockpitConfig {
     /// "subprocess started" signal.
     #[serde(default = "default_true")]
     pub show_tool_durations: bool,
+    /// How the web composer drains client-side queued follow-up prompts
+    /// when the agent finishes a turn (see #1031). `Combined` (default)
+    /// joins every queued entry with a blank line and dispatches as one
+    /// prompt; `Serial` pops the head and waits for the next Stopped to
+    /// fire the next entry. The setting is surfaced via
+    /// `ServerAbout.cockpit_queue_drain_mode` so toggling it here flows
+    /// to every connected web client without restarting the daemon.
+    #[serde(default)]
+    pub queue_drain_mode: QueueDrainMode,
+    /// Maximum number of cockpit worker resumes (spawn or attach) the
+    /// reconciler runs in parallel on `aoe serve` cold start. Bounded
+    /// at runtime by `min(max_concurrent_resumes, max_concurrent_workers).max(1)`
+    /// so this knob can never exceed the total live worker cap. Default
+    /// is 4: Node.js bootup is memory-heavy and 4 concurrent
+    /// claude-agent-acp processes are around 200-320MB transient. Lower
+    /// it on constrained hosts; raise on beefier machines. See #1088.
+    #[serde(default = "default_max_concurrent_resumes")]
+    pub max_concurrent_resumes: u32,
+}
+
+fn default_max_concurrent_resumes() -> u32 {
+    4
+}
+
+/// Drain strategy for the cockpit composer's client-side prompt queue.
+/// See `CockpitConfig::queue_drain_mode`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum QueueDrainMode {
+    /// Join every queued entry with `\n\n` and dispatch as a single
+    /// prompt when the current turn ends. One response covers the whole
+    /// batch.
+    #[default]
+    Combined,
+    /// Pop the head off the queue and dispatch it; wait for the next
+    /// Stopped event before firing the following entry. One response
+    /// per queued entry.
+    Serial,
+}
+
+impl QueueDrainMode {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            QueueDrainMode::Combined => "combined",
+            QueueDrainMode::Serial => "serial",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<Self> {
+        match s {
+            "combined" => Some(QueueDrainMode::Combined),
+            "serial" => Some(QueueDrainMode::Serial),
+            _ => None,
+        }
+    }
 }
 
 impl Default for CockpitConfig {
@@ -103,6 +172,8 @@ impl Default for CockpitConfig {
             replay_bytes: default_replay_bytes(),
             node_path: String::new(),
             show_tool_durations: true,
+            queue_drain_mode: QueueDrainMode::default(),
+            max_concurrent_resumes: default_max_concurrent_resumes(),
         }
     }
 }
@@ -380,6 +451,15 @@ pub struct WebConfig {
     /// Server-wide default: fire a push on Running to Error transitions.
     #[serde(default = "default_true")]
     pub notify_on_error: bool,
+
+    /// Server-wide default: fire a push when a cockpit session's
+    /// `ScheduleWakeup` timer fires (the next /loop turn starts). On by
+    /// default because the headline use case for `/loop` dynamic mode
+    /// is "walk away during the sleep window"; without a push the
+    /// user has to keep peeking at the dashboard. Suppression for
+    /// active TUI / web sessions still applies. See #1091.
+    #[serde(default = "default_true")]
+    pub notify_on_wake_fire: bool,
 }
 
 impl Default for WebConfig {
@@ -389,6 +469,7 @@ impl Default for WebConfig {
             notify_on_waiting: true,
             notify_on_idle: false,
             notify_on_error: true,
+            notify_on_wake_fire: true,
         }
     }
 }
@@ -459,6 +540,14 @@ pub struct UpdatesConfig {
 
     #[serde(default = "default_true")]
     pub notify_in_cli: bool,
+
+    /// How often the web dashboard re-polls `/api/system/update-status`
+    /// while a tab is open. Server-side cache is governed by
+    /// `check_interval_hours`; this knob only controls how aggressively
+    /// the frontend asks. Keep it lower than `check_interval_hours * 60`
+    /// or every poll is a cache hit. See #984.
+    #[serde(default = "default_web_poll_interval_minutes")]
+    pub web_poll_interval_minutes: u64,
 }
 
 impl Default for UpdatesConfig {
@@ -467,6 +556,7 @@ impl Default for UpdatesConfig {
             check_enabled: true,
             check_interval_hours: 24,
             notify_in_cli: true,
+            web_poll_interval_minutes: 60,
         }
     }
 }
@@ -477,6 +567,10 @@ fn default_true() -> bool {
 
 fn default_check_interval() -> u64 {
     24
+}
+
+fn default_web_poll_interval_minutes() -> u64 {
+    60
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

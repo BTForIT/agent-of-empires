@@ -36,10 +36,10 @@ import { TopBar } from "./components/TopBar";
 import { ContentSplit } from "./components/ContentSplit";
 import { TerminalView } from "./components/TerminalView";
 // Lazy-load the cockpit surface so non-cockpit users never download
-// the @assistant-ui/react, shiki, and react-diff-viewer dependency
-// tree. Cuts ~hundreds of KB off the cold-start bundle for the
-// (currently default) tmux-only flow. The Suspense fallback below
-// covers the brief load while the chunk arrives.
+// the @assistant-ui/react, shiki, and in-house StringDiff/DiffLine
+// dependency tree. Cuts ~hundreds of KB off the cold-start bundle
+// for the (currently default) tmux-only flow. The Suspense fallback
+// below covers the brief load while the chunk arrives.
 const CockpitView = lazy(() =>
   import("./components/cockpit/CockpitView").then((m) => ({
     default: m.CockpitView,
@@ -64,6 +64,9 @@ import {
 import { AboutModal } from "./components/AboutModal";
 import { CommandPalette } from "./components/command-palette/CommandPalette";
 import { DisconnectBanner } from "./components/DisconnectBanner";
+import { UpdateBanner } from "./components/UpdateBanner";
+
+const RIGHT_PANEL_COLLAPSED_KEY = "aoe-right-collapsed";
 
 export default function App() {
   const [loginRequired, setLoginRequired] = useState<boolean | null>(null);
@@ -160,10 +163,27 @@ function AppContent({ loginRequired, onLogout }: { loginRequired: boolean; onLog
   const workspaces = useWorkspaces(sessions);
   const { groups, toggleRepoCollapsed } = useRepoGroups(workspaces);
 
-  const [selectedFilePath, setSelectedFilePath] = useState<string | null>(null);
-  const [diffCollapsed, setDiffCollapsed] = useState(
-    () => window.innerWidth < 768,
-  );
+  // Selected diff-file identity. `repoName` is undefined for single-repo
+  // sessions and the workspace member name for multi-repo workspaces.
+  // Kept as one state so the path + repo always update together; with
+  // two parallel states we'd briefly fetch the wrong repo when only
+  // one side changed (workspace path collisions across repos make this
+  // a real bug, not theoretical). See #1047.
+  const [selectedFile, setSelectedFile] = useState<{
+    path: string;
+    repoName?: string;
+  } | null>(null);
+  const selectedFilePath = selectedFile?.path ?? null;
+  const selectedRepoName = selectedFile?.repoName;
+  const [diffCollapsed, setDiffCollapsed] = useState(() => {
+    const stored = localStorage.getItem(RIGHT_PANEL_COLLAPSED_KEY);
+    if (stored === "1") return true;
+    if (stored === "0") return false;
+    return window.innerWidth < 768;
+  });
+  useEffect(() => {
+    localStorage.setItem(RIGHT_PANEL_COLLAPSED_KEY, diffCollapsed ? "1" : "0");
+  }, [diffCollapsed]);
   const [showSessionWizard, setShowSessionWizard] = useState(false);
   const [showHelp, setShowHelp] = useState(false);
   const [showPalette, setShowPalette] = useState(false);
@@ -183,12 +203,17 @@ function AppContent({ loginRequired, onLogout }: { loginRequired: boolean; onLog
     (s) => s.id === activeSessionId,
   );
 
-  const { files: diffFiles, baseBranch, warning, loading: diffFilesLoading, revision } =
-    useDiffFiles(activeSessionId, !diffCollapsed);
+  const {
+    files: diffFiles,
+    perRepoBases,
+    warning,
+    loading: diffFilesLoading,
+    revision,
+  } = useDiffFiles(activeSessionId, !diffCollapsed);
 
   useEffect(() => {
     if (!activeSessionId) {
-      setSelectedFilePath(null);
+      setSelectedFile(null);
       return;
     }
     if (
@@ -196,12 +221,12 @@ function AppContent({ loginRequired, onLogout }: { loginRequired: boolean; onLog
       !diffFilesLoading &&
       !diffFiles.some((f) => f.path === selectedFilePath)
     ) {
-      setSelectedFilePath(null);
+      setSelectedFile(null);
     }
   }, [activeSessionId, diffFiles, diffFilesLoading, selectedFilePath]);
 
   useEffect(() => {
-    setSelectedFilePath(null);
+    setSelectedFile(null);
   }, [activeSessionId]);
 
   const focusKeyboardProxy = () => {
@@ -324,17 +349,20 @@ function AppContent({ loginRequired, onLogout }: { loginRequired: boolean; onLog
 
   const toggleDiff = useCallback(() => setDiffCollapsed((c) => !c), []);
 
-  const handleSelectFile = useCallback((path: string) => {
-    setSelectedFilePath(path);
-  }, []);
+  const handleSelectFile = useCallback(
+    (path: string, repoName?: string) => {
+      setSelectedFile({ path, repoName });
+    },
+    [],
+  );
 
   const handleCloseFile = useCallback(() => {
-    setSelectedFilePath(null);
+    setSelectedFile(null);
   }, []);
 
   const handleGoDashboard = useCallback(() => {
     navigate("/");
-    setSelectedFilePath(null);
+    setSelectedFile(null);
   }, [navigate]);
 
   const handleOpenSettings = useCallback(() => {
@@ -436,7 +464,7 @@ function AppContent({ loginRequired, onLogout }: { loginRequired: boolean; onLog
       // Agent terminal is hidden under the diff viewer; close the diff first
       // so the wrapper un-hides, then dispatch on the next frame because
       // focus() on a display:none element is a no-op.
-      setSelectedFilePath(null);
+      setSelectedFile(null);
       requestAnimationFrame(() => dispatchFocusTerminal("agent"));
       return;
     }
@@ -467,7 +495,7 @@ function AppContent({ loginRequired, onLogout }: { loginRequired: boolean; onLog
           setShowHelp(false);
           if (showSettings) handleCloseSettings();
           setShowAbout(false);
-          setSelectedFilePath(null);
+          setSelectedFile(null);
         },
         onHelp: () => setShowHelp((h) => !h),
         onSettings: () => (showSettings ? handleCloseSettings() : navigate("/settings")),
@@ -550,14 +578,15 @@ function AppContent({ loginRequired, onLogout }: { loginRequired: boolean; onLog
                     <CockpitView
                       key={activeSessionId}
                       sessionId={activeSessionId!}
+                      cockpitWorkerState={activeSession.cockpit_worker_state ?? "absent"}
                     />
                   </Suspense>
                 ) : (
                   <TerminalView
                     key={activeSessionId}
                     session={activeSession}
-                    experimentalCockpit={
-                      !!serverAbout?.experimental_cockpit
+                    cockpitMasterEnabled={
+                      !!serverAbout?.cockpit_master_enabled
                     }
                   />
                 )}
@@ -567,6 +596,7 @@ function AppContent({ loginRequired, onLogout }: { loginRequired: boolean; onLog
                 <DiffFileViewer
                   sessionId={activeSessionId}
                   filePath={selectedFilePath}
+                  repoName={selectedRepoName}
                   revision={revision}
                   onClose={handleCloseFile}
                 />
@@ -578,10 +608,11 @@ function AppContent({ loginRequired, onLogout }: { loginRequired: boolean; onLog
               session={activeSession ?? null}
               sessionId={activeSessionId}
               files={diffFiles}
-              baseBranch={baseBranch}
+              perRepoBases={perRepoBases}
               warning={warning}
               filesLoading={diffFilesLoading}
               selectedFilePath={selectedFilePath}
+              selectedRepoName={selectedRepoName}
               onSelectFile={handleSelectFile}
             />
           }
@@ -606,8 +637,12 @@ function AppContent({ loginRequired, onLogout }: { loginRequired: boolean; onLog
   const cockpitPrefs = useMemo(
     () => ({
       showToolDurations: serverAbout?.cockpit_show_tool_durations ?? true,
+      queueDrainMode: serverAbout?.cockpit_queue_drain_mode ?? "combined",
     }),
-    [serverAbout?.cockpit_show_tool_durations],
+    [
+      serverAbout?.cockpit_show_tool_durations,
+      serverAbout?.cockpit_queue_drain_mode,
+    ],
   );
 
   return (
@@ -632,6 +667,7 @@ function AppContent({ loginRequired, onLogout }: { loginRequired: boolean; onLog
       />
 
       <DisconnectBanner />
+      <UpdateBanner />
 
       <div className="flex flex-1 min-h-0">
         {!showSettings && !showProjects && (
@@ -669,8 +705,8 @@ function AppContent({ loginRequired, onLogout }: { loginRequired: boolean; onLog
             setWizardPrefill(undefined);
           }}
           prefill={wizardPrefill}
-          experimentalCockpit={
-            !!serverAbout?.experimental_cockpit
+          cockpitMasterEnabled={
+            !!serverAbout?.cockpit_master_enabled
           }
         />
       )}

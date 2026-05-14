@@ -6,7 +6,7 @@ import { MobileTerminalToolbar } from "./MobileTerminalToolbar";
 import { BackToLiveButton } from "./BackToLiveButton";
 import { KeyboardFab } from "./KeyboardFab";
 import { ensureTerminal } from "../lib/api";
-import type { RichDiffFile, SessionResponse } from "../lib/types";
+import type { RepoBase, RichDiffFile, SessionResponse } from "../lib/types";
 import {
   FOCUS_TERMINAL_EVENT,
   consumePendingTerminalFocus,
@@ -37,11 +37,12 @@ interface Props {
   session: SessionResponse | null;
   sessionId: string | null;
   files: RichDiffFile[];
-  baseBranch: string;
+  perRepoBases: RepoBase[];
   warning: string | null;
   filesLoading: boolean;
   selectedFilePath: string | null;
-  onSelectFile: (path: string) => void;
+  selectedRepoName: string | undefined;
+  onSelectFile: (path: string, repoName?: string) => void;
 }
 
 type ShellMode = "host" | "container";
@@ -66,6 +67,7 @@ function PairedTerminal({
     exitScrollback,
     ctrlActiveRef,
     clearCtrlRef,
+    maxRetries,
   } = useTerminal(ready ? sessionId : null, wsPath, false);
   // PairedTerminal intentionally uses the live keyboardHeight, not the
   // sticky reservation that TerminalView uses. The slide-in only gives
@@ -213,11 +215,11 @@ function PairedTerminal({
       {!state.connected && state.reconnecting && (
         <div className="bg-status-waiting/15 border-b border-status-waiting/30 px-3 py-1 shrink-0">
           <span className="text-xs text-status-waiting">
-            Reconnecting... ({state.retryCount}/3)
+            Reconnecting... ({state.retryCount}/{maxRetries})
           </span>
         </div>
       )}
-      {!state.connected && !state.reconnecting && state.retryCount >= 3 && (
+      {!state.connected && !state.reconnecting && state.retryCount >= maxRetries && (
         <div className="bg-status-error/10 border-b border-status-error/30 px-3 py-1 flex items-center gap-2 shrink-0">
           <span className="text-xs text-status-error">Disconnected</span>
           <button
@@ -265,10 +267,11 @@ export function RightPanel({
   session,
   sessionId,
   files,
-  baseBranch,
+  perRepoBases,
   warning,
   filesLoading,
   selectedFilePath,
+  selectedRepoName,
   onSelectFile,
 }: Props) {
   const [shellMode, setShellMode] = useState<ShellMode>("host");
@@ -360,9 +363,10 @@ export function RightPanel({
       >
         <DiffFileList
           files={files}
-          baseBranch={baseBranch}
+          perRepoBases={perRepoBases}
           warning={warning}
           selectedPath={selectedFilePath}
+          selectedRepoName={selectedRepoName}
           loading={filesLoading}
           onSelectFile={onSelectFile}
         />

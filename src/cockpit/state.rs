@@ -64,6 +64,13 @@ pub struct ToolCall {
     /// 16 KB cap applied at ingest, control chars stripped.
     pub args_preview: String,
     pub started_at: DateTime<Utc>,
+    /// When the agent launches a sub-agent (Claude's Task tool) the
+    /// adapter rides `_meta.claudeCode.parentToolUseId` along on the
+    /// child tool calls. We thread it through here so the cockpit can
+    /// render sub-tasks under their parent Task instead of as a flat
+    /// stream. None for top-level tool calls. See #1041.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_tool_call_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -373,6 +380,18 @@ pub enum Event {
     SessionContextReset {
         reason: String,
     },
+    /// The agent invoked the Claude SDK's `ScheduleWakeup` tool. The
+    /// session will sit idle until `at`, then a new turn fires. Emitted
+    /// from `acp_client::map_update_to_events` on `ToolCallStarted` for
+    /// `ScheduleWakeup` so the sidebar can flip to a "scheduled" badge
+    /// plus countdown without subscribing to the cockpit WS. Considered
+    /// pending until the next `UserPromptSent` lands, which is what
+    /// /loop's self-firing emits when the wake actually triggers. See
+    /// #1091.
+    WakeupScheduled {
+        at: DateTime<Utc>,
+        reason: Option<String>,
+    },
 }
 
 impl CockpitState {
@@ -466,6 +485,11 @@ impl CockpitState {
                 // emits its first UsageUpdate.
                 self.usage = None;
             }
+            // Persistent state for "scheduled wakeup" lives in the
+            // event log (queried by the REST endpoint per #1091); no
+            // in-memory mirror needed yet. Bumps seq so the WS replay
+            // surfaces it to live clients.
+            Event::WakeupScheduled { .. } => {}
         }
         self.last_seq = self.last_seq.saturating_add(1);
         self.updated_at = Utc::now();
@@ -533,6 +557,7 @@ mod tests {
             kind: "read".into(),
             args_preview: "{\"path\":\"x\"}".into(),
             started_at: Utc::now(),
+            parent_tool_call_id: None,
         };
         s.apply_event(Event::ToolCallStarted {
             tool_call: tc.clone(),
