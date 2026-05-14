@@ -915,8 +915,8 @@ fn build_sandbox_fields(
         },
         SettingField {
             key: FieldKey::Environment,
-            label: "Environment",
-            description: "Env vars: bare KEY passes host value, KEY=VALUE sets explicitly",
+            label: "Sandbox Environment",
+            description: "Env vars injected into the container: KEY=value (literal, appears in argv), KEY=$VAR (passthrough from host, hidden from argv), KEY=$$literal (escape a leading $), or bare KEY (passthrough). For host (non-sandboxed) sessions, see Session > Host Environment instead.",
             value: FieldValue::List(environment),
             category: SettingsCategory::Sandbox,
             has_override: o4,
@@ -1422,7 +1422,7 @@ fn build_session_fields(
         SettingField {
             key: FieldKey::HostEnvironment,
             label: "Host Environment",
-            description: "Env vars injected into the host command line: KEY=value (literal), KEY=$VAR (passthrough from host), KEY=$$literal (escape a leading $), or bare KEY (passthrough). All forms resolve to a literal `KEY=value` arg in the spawned process, visible in `ps`; pick container-side `sandbox.environment` for secrets you want hidden from argv. Profile value replaces the global list.",
+            description: "Env vars injected into the host command line: KEY=value (literal), KEY=$VAR (passthrough from host), KEY=$$literal (escape a leading $), or bare KEY (passthrough). All forms resolve to a literal `KEY=value` arg in the spawned process, visible in `ps`; for secrets you want hidden from argv, configure Sandbox > Sandbox Environment instead. Profile value replaces the global list.",
             value: FieldValue::List(host_environment),
             category: SettingsCategory::Session,
             has_override: host_env_override,

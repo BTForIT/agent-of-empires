@@ -117,9 +117,9 @@ Each entry follows the same grammar as `sandbox.environment`:
 - **`KEY=$$literal`** -- escape; emits `KEY=$literal`.
 - **`KEY`** (bare) -- passthrough from the host env (skipped with a warning if unset).
 
-All forms resolve to a literal `KEY=value` argument on the spawned process and are therefore visible in `ps`. Use `sandbox.environment` instead for secrets you want hidden from argv on a host-side mount.
+All forms resolve to a literal `KEY=value` argument on the spawned process and are therefore visible in `ps`. For secrets you want hidden from argv, use [`sandbox.environment`](#sandbox-docker) instead. Host and sandbox sessions take disjoint code paths: a sandboxed session reads only `sandbox.environment`, an unsandboxed session reads only the top-level `environment`. Set both lists if you want a variable available regardless of how the session launches.
 
-Profile-scoped `environment` replaces the global list entirely (matching the `sandbox.environment` override semantics). Sandboxed sessions ignore this list; configure `sandbox.environment` for the in-container side.
+Profile-scoped `environment` replaces the global list entirely (matching the `sandbox.environment` override semantics).
 
 ## Worktree
 
@@ -186,6 +186,8 @@ default_terminal_mode = "host"
 Each entry in the `environment` list can be:
 - **`KEY`** (bare name) -- passes the host env var value into the container
 - **`KEY=VALUE`** -- sets an explicit value; if VALUE starts with `$`, it reads from a host env var (e.g., `GH_TOKEN=$AOE_GH_TOKEN`). Use `$$` for a literal `$`.
+
+Bare `KEY` and `KEY=$VAR` entries use Docker's `-e KEY` (key-only) form so the value stays out of argv. For env vars on **host (non-sandboxed) sessions**, see [Host Environment](#host-environment) instead. The two lists live on disjoint code paths: a sandboxed session reads only `sandbox.environment`, an unsandboxed session reads only top-level `environment`.
 
 ## tmux
 
