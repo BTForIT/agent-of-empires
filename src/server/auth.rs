@@ -78,13 +78,17 @@ fn build_cookie(token: &str, secure: bool, max_age_secs: u64) -> String {
 /// localStorage-cached token when the server rotates. Without the header,
 /// a rotated token would brick the PWA until the user manually re-visits
 /// with a fresh `?token=` URL.
+///
+/// Uses `append` so that handlers (e.g. `login_handler` issuing
+/// `aoe_session`) that already wrote a Set-Cookie aren't clobbered when the
+/// middleware refreshes the token cookie on its way out.
 async fn attach_token_headers(response: &mut Response, state: &AppState) {
     let Some(current) = state.token_manager.current_token().await else {
         return;
     };
     let max_age = state.token_manager.lifetime_secs().await;
     let cookie = build_cookie(&current, state.behind_tunnel, max_age);
-    response.headers_mut().insert(
+    response.headers_mut().append(
         header::SET_COOKIE,
         cookie.parse().expect("cookie format must be valid"),
     );
