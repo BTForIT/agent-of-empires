@@ -3,11 +3,13 @@
 pub(crate) mod env;
 mod session;
 pub mod status_bar;
+pub(crate) mod signal_detection;
 pub(crate) mod status_detection;
 mod terminal_session;
 pub(crate) mod utils;
 
 pub use session::Session;
+pub use signal_detection::{detect_signals_from_content, AgentSignal};
 pub use status_bar::{get_session_info_for_current, get_status_for_current_session};
 pub use status_detection::detect_status_from_content;
 pub use terminal_session::{ContainerTerminalSession, TerminalSession};

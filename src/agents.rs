@@ -4,6 +4,7 @@
 //! `AgentDef` entry to `AGENTS` and writing a status detection function.
 
 use crate::session::Status;
+use crate::tmux::signal_detection::{self, AgentSignal};
 use crate::tmux::status_detection;
 
 /// How to check whether an agent binary is installed on the host.
@@ -82,6 +83,11 @@ pub struct AgentDef {
     pub set_default_command: bool,
     /// Status detection function pointer. Takes raw (non-lowercased) pane content.
     pub detect_status: fn(&str) -> Status,
+    /// Output-pattern signal detection function pointer (limits exhausted,
+    /// auth required, etc.). Returns zero or more events per call. Agents
+    /// without registered patterns point at
+    /// [`crate::tmux::signal_detection::no_signals`].
+    pub detect_signals: fn(&str) -> Vec<AgentSignal>,
     /// Environment variables always injected into the container for this agent.
     pub container_env: &'static [(&'static str, &'static str)],
     /// Hook configuration for file-based status detection. If set, AoE installs
@@ -174,6 +180,7 @@ pub const AGENTS: &[AgentDef] = &[
         instruction_flag: Some("--append-system-prompt {}"),
         set_default_command: false,
         detect_status: status_detection::detect_claude_status,
+        detect_signals: signal_detection::detect_claude_signals,
         container_env: &[("CLAUDE_CONFIG_DIR", "/root/.claude")],
         hook_config: Some(AgentHookConfig {
             settings_rel_path: ".claude/settings.json",
@@ -196,6 +203,7 @@ pub const AGENTS: &[AgentDef] = &[
         instruction_flag: None,
         set_default_command: true,
         detect_status: status_detection::detect_opencode_status,
+        detect_signals: signal_detection::no_signals,
         container_env: &[],
         hook_config: None,
         resume_strategy: ResumeStrategy::Flag("--session"),
@@ -212,6 +220,7 @@ pub const AGENTS: &[AgentDef] = &[
         instruction_flag: None,
         set_default_command: false,
         detect_status: status_detection::detect_vibe_status,
+        detect_signals: signal_detection::no_signals,
         container_env: &[],
         hook_config: None,
         resume_strategy: ResumeStrategy::Flag("--resume"),
@@ -230,6 +239,7 @@ pub const AGENTS: &[AgentDef] = &[
         instruction_flag: Some("--config developer_instructions={}"),
         set_default_command: true,
         detect_status: status_detection::detect_codex_status,
+        detect_signals: signal_detection::no_signals,
         container_env: &[],
         hook_config: None,
         resume_strategy: ResumeStrategy::Subcommand("resume"),
@@ -249,6 +259,7 @@ pub const AGENTS: &[AgentDef] = &[
         instruction_flag: None,
         set_default_command: false,
         detect_status: status_detection::detect_gemini_status,
+        detect_signals: signal_detection::no_signals,
         container_env: &[],
         hook_config: Some(AgentHookConfig {
             settings_rel_path: ".gemini/settings.json",
@@ -289,6 +300,7 @@ pub const AGENTS: &[AgentDef] = &[
         instruction_flag: None,
         set_default_command: false,
         detect_status: status_detection::detect_cursor_status,
+        detect_signals: signal_detection::no_signals,
         container_env: &[("CURSOR_CONFIG_DIR", "/root/.cursor")],
         hook_config: Some(AgentHookConfig {
             settings_rel_path: ".cursor/settings.json",
@@ -308,6 +320,7 @@ pub const AGENTS: &[AgentDef] = &[
         instruction_flag: None,
         set_default_command: false,
         detect_status: status_detection::detect_copilot_status,
+        detect_signals: signal_detection::no_signals,
         container_env: &[("COPILOT_CONFIG_DIR", "/root/.copilot")],
         hook_config: None,
         resume_strategy: ResumeStrategy::Unsupported,
@@ -325,6 +338,7 @@ pub const AGENTS: &[AgentDef] = &[
         instruction_flag: None,
         set_default_command: false,
         detect_status: status_detection::detect_pi_status,
+        detect_signals: signal_detection::no_signals,
         container_env: &[("PI_CODING_AGENT_DIR", "/root/.pi/agent")],
         hook_config: None,
         resume_strategy: ResumeStrategy::Flag("--session"),
@@ -341,6 +355,7 @@ pub const AGENTS: &[AgentDef] = &[
         instruction_flag: None,
         set_default_command: false,
         detect_status: status_detection::detect_droid_status,
+        detect_signals: signal_detection::no_signals,
         container_env: &[],
         hook_config: None,
         resume_strategy: ResumeStrategy::Unsupported,
@@ -357,6 +372,7 @@ pub const AGENTS: &[AgentDef] = &[
         instruction_flag: None,
         set_default_command: false,
         detect_status: status_detection::detect_settl_status,
+        detect_signals: signal_detection::no_signals,
         container_env: &[],
         hook_config: None,
         resume_strategy: ResumeStrategy::Unsupported,
@@ -376,6 +392,7 @@ pub const AGENTS: &[AgentDef] = &[
         // installed by hooks::install_hermes_hooks(); the stub here just
         // returns Idle as a fallback before the first hook fires.
         detect_status: status_detection::detect_hermes_status,
+        detect_signals: signal_detection::no_signals,
         // HERMES_ACCEPT_HOOKS bypasses the first-use TTY consent prompt for
         // shell hooks. Hermes still gates each (event, command) on its
         // allowlist file, which AoE pre-populates in install_hermes_hooks.
@@ -399,6 +416,7 @@ pub const AGENTS: &[AgentDef] = &[
         instruction_flag: None,
         set_default_command: false,
         detect_status: status_detection::detect_kiro_status,
+        detect_signals: signal_detection::no_signals,
         container_env: &[("KIRO_CONFIG_DIR", "/root/.kiro")],
         // Kiro uses a per-agent JSON config (lowercase event names, flat
         // {command} objects) rather than the JSON settings.json schema shared
@@ -420,6 +438,7 @@ pub const AGENTS: &[AgentDef] = &[
         instruction_flag: Some("--append-system-prompt {}"),
         set_default_command: false,
         detect_status: status_detection::detect_qwen_status,
+        detect_signals: signal_detection::no_signals,
         container_env: &[],
         hook_config: Some(AgentHookConfig {
             settings_rel_path: ".qwen/settings.json",
