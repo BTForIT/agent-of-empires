@@ -42,7 +42,7 @@ const OVERSIZE_BYTES: u64 = 50 * 1024 * 1024;
 
 /// Outcome of a `recover_transcript_for_sid` call. Encodes which branch of the
 /// cascade fired so callers can log it and choose follow-up behavior (e.g.
-/// fresh-launch fallback when `NoArchiveFreshLaunch`).
+/// fresh-launch fallback when `NoArchiveFreshLaunch` or `StrictSkipped`).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RecoveryOutcome {
     /// Transcript was readable and within size budget; nothing to do.
@@ -57,17 +57,41 @@ pub enum RecoveryOutcome {
     /// Transcript missing and no archive available. Caller should launch
     /// fresh (without `--resume`) to keep the pane alive.
     NoArchiveFreshLaunch,
+    /// Recovery would have mutated transcript bytes (trim oversized, restore
+    /// from archive) but [`super::RecoveryMode::Strict`] forbids it. Caller
+    /// should fall back to a fresh launch. `reason` describes which mutation
+    /// was skipped for log/debug purposes.
+    StrictSkipped { reason: StrictSkipReason },
     /// Recovery does not apply to this session (e.g. non-Claude tool, no
     /// session ID, project dir missing). No action taken.
     NotApplicable,
+}
+
+/// Why a `Strict` recovery declined to act. Carried in
+/// [`RecoveryOutcome::StrictSkipped`] for logs/diagnostics.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StrictSkipReason {
+    /// Transcript exists but exceeds the oversize budget; would need trimming.
+    Oversized,
+    /// Transcript missing; archive exists but `Strict` won't restore it.
+    MissingWithArchive,
+    /// Transcript missing and no archive (would equal `NoArchiveFreshLaunch`
+    /// under any mode; reported as `StrictSkipped` so callers see a uniform
+    /// "Strict declined" signal).
+    MissingNoArchive,
 }
 
 /// [`super::HarnessRecovery`] implementation for Claude Code sessions.
 pub struct ClaudeRecovery;
 
 impl super::HarnessRecovery for ClaudeRecovery {
-    fn recover(&self, sid: &str, project_path: &str) -> Result<RecoveryOutcome> {
-        recover_transcript_for_sid(sid, project_path)
+    fn recover(
+        &self,
+        sid: &str,
+        project_path: &str,
+        mode: super::RecoveryMode,
+    ) -> Result<RecoveryOutcome> {
+        recover_transcript_for_sid(sid, project_path, mode)
     }
 }
 
@@ -77,10 +101,24 @@ impl super::HarnessRecovery for ClaudeRecovery {
 /// (Instance::project_path); it is encoded with Claude's project-dir naming
 /// convention to locate `~/.claude/projects/<encoded>/<sid>.jsonl`.
 ///
+/// `mode` controls aggressiveness: [`super::RecoveryMode::Strict`] declines
+/// any byte-mutating branch and returns [`RecoveryOutcome::StrictSkipped`] so
+/// the caller can fresh-launch; [`super::RecoveryMode::Cascade`] runs the full
+/// trim/restore cascade; [`super::RecoveryMode::Off`] returns
+/// [`RecoveryOutcome::NotApplicable`] immediately (the instance-level handler
+/// also short-circuits before calling, this is belt-and-suspenders).
+///
 /// Returns the outcome of the cascade. Never returns an error for the
 /// "transcript already fine" case; only filesystem errors during restoration
 /// or trim escape.
-pub fn recover_transcript_for_sid(sid: &str, project_path: &str) -> Result<RecoveryOutcome> {
+pub fn recover_transcript_for_sid(
+    sid: &str,
+    project_path: &str,
+    mode: super::RecoveryMode,
+) -> Result<RecoveryOutcome> {
+    if matches!(mode, super::RecoveryMode::Off) {
+        return Ok(RecoveryOutcome::NotApplicable);
+    }
     let claude_home = match resolve_claude_home() {
         Some(p) => p,
         None => {
@@ -107,6 +145,18 @@ pub fn recover_transcript_for_sid(sid: &str, project_path: &str) -> Result<Recov
             if meta.len() <= OVERSIZE_BYTES {
                 return Ok(RecoveryOutcome::TranscriptOk);
             }
+            if matches!(mode, super::RecoveryMode::Strict) {
+                tracing::warn!(
+                    "recovery: transcript oversized ({} bytes > {}); strict mode \
+                     declined to trim {}, caller will fresh-launch",
+                    meta.len(),
+                    OVERSIZE_BYTES,
+                    live_path.display()
+                );
+                return Ok(RecoveryOutcome::StrictSkipped {
+                    reason: StrictSkipReason::Oversized,
+                });
+            }
             tracing::warn!(
                 "recovery: transcript oversized ({} bytes > {}); trimming {}",
                 meta.len(),
@@ -130,8 +180,18 @@ pub fn recover_transcript_for_sid(sid: &str, project_path: &str) -> Result<Recov
             );
             let archive_dir = project_dir.join("archived");
             let newest = newest_archive_for_sid(&archive_dir, sid)?;
-            match newest {
-                Some(archive) => {
+            match (newest, mode) {
+                (Some(_), super::RecoveryMode::Strict) => {
+                    tracing::info!(
+                        "recovery: archive present for sid {} but strict mode declined to \
+                         restore; caller will fresh-launch",
+                        sid
+                    );
+                    Ok(RecoveryOutcome::StrictSkipped {
+                        reason: StrictSkipReason::MissingWithArchive,
+                    })
+                }
+                (Some(archive), super::RecoveryMode::Cascade) => {
                     let lines = read_lines(&archive)
                         .with_context(|| format!("reading archive {}", archive.display()))?;
                     let trimmed = trim_jsonl(&lines);
@@ -144,13 +204,28 @@ pub fn recover_transcript_for_sid(sid: &str, project_path: &str) -> Result<Recov
                     );
                     Ok(RecoveryOutcome::RestoredFromArchive { archive })
                 }
-                None => {
+                (None, super::RecoveryMode::Strict) => {
+                    tracing::info!(
+                        "recovery: no archive for sid {} in {} (strict); caller will \
+                         fresh-launch",
+                        sid,
+                        archive_dir.display()
+                    );
+                    Ok(RecoveryOutcome::StrictSkipped {
+                        reason: StrictSkipReason::MissingNoArchive,
+                    })
+                }
+                (None, super::RecoveryMode::Cascade) => {
                     tracing::info!(
                         "recovery: no archive for sid {} in {}; caller should fresh-launch",
                         sid,
                         archive_dir.display()
                     );
                     Ok(RecoveryOutcome::NoArchiveFreshLaunch)
+                }
+                (_, super::RecoveryMode::Off) => {
+                    // Unreachable: short-circuited at function entry.
+                    Ok(RecoveryOutcome::NotApplicable)
                 }
             }
         }
@@ -380,29 +455,26 @@ mod tests {
         (temp, proj)
     }
 
-    #[test]
-    #[serial_test::serial]
-    fn recovery_transcript_ok_when_small_and_present() {
-        let project = "/tmp/aoe-recovery-ok";
-        let (_g, proj_dir) = isolated_claude_home(project);
-        let sid = "11111111-1111-1111-1111-111111111111";
-        let live = proj_dir.join(format!("{sid}.jsonl"));
-        fs::write(&live, "{\"hello\":\"world\"}\n").unwrap();
-
-        let out = recover_transcript_for_sid(sid, project).unwrap();
-        assert_eq!(out, RecoveryOutcome::TranscriptOk);
+    fn build_oversize_transcript(path: &Path) {
+        let mut f = fs::File::create(path).unwrap();
+        for i in 0..5 {
+            f.write_all(format!("{{\"hdr\":{i}}}\n").as_bytes())
+                .unwrap();
+        }
+        f.write_all(b"{\"compactMetadata\":{\"preTokens\":999,\"postTokens\":1}}\n")
+            .unwrap();
+        let pad = "{\"junk\":\"".to_string() + &"x".repeat(1024) + "\"}\n";
+        let needed = (OVERSIZE_BYTES as usize / pad.len()) + 1;
+        for _ in 0..needed {
+            f.write_all(pad.as_bytes()).unwrap();
+        }
+        for i in 0..300 {
+            f.write_all(format!("{{\"tail\":{i}}}\n").as_bytes())
+                .unwrap();
+        }
     }
 
-    #[test]
-    #[serial_test::serial]
-    fn recovery_missing_restores_from_archive() {
-        let project = "/tmp/aoe-recovery-archive";
-        let (_g, proj_dir) = isolated_claude_home(project);
-        let sid = "22222222-2222-2222-2222-222222222222";
-        let archive_dir = proj_dir.join("archived");
-        fs::create_dir_all(&archive_dir).unwrap();
-
-        // Synthesize an archived transcript big enough to exercise the trim path.
+    fn build_archive_transcript(path: &Path) {
         let mut body = String::new();
         for i in 0..5 {
             body.push_str(&format!("{{\"hdr\":{i}}}\n"));
@@ -414,10 +486,50 @@ mod tests {
         for i in 0..300 {
             body.push_str(&format!("{{\"tail\":{i}}}\n"));
         }
-        let archive_path = archive_dir.join(format!("{sid}.jsonl.thrash-20260512-120000"));
-        fs::write(&archive_path, body).unwrap();
+        fs::write(path, body).unwrap();
+    }
 
-        let out = recover_transcript_for_sid(sid, project).unwrap();
+    #[test]
+    #[serial_test::serial]
+    fn recovery_transcript_ok_when_small_and_present() {
+        let project = "/tmp/aoe-recovery-ok";
+        let (_g, proj_dir) = isolated_claude_home(project);
+        let sid = "11111111-1111-1111-1111-111111111111";
+        let live = proj_dir.join(format!("{sid}.jsonl"));
+        fs::write(&live, "{\"hello\":\"world\"}\n").unwrap();
+
+        let out =
+            recover_transcript_for_sid(sid, project, super::super::RecoveryMode::Cascade).unwrap();
+        assert_eq!(out, RecoveryOutcome::TranscriptOk);
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn recovery_strict_passes_small_transcript_through() {
+        let project = "/tmp/aoe-recovery-strict-ok";
+        let (_g, proj_dir) = isolated_claude_home(project);
+        let sid = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa";
+        let live = proj_dir.join(format!("{sid}.jsonl"));
+        fs::write(&live, "{\"hello\":\"world\"}\n").unwrap();
+
+        let out =
+            recover_transcript_for_sid(sid, project, super::super::RecoveryMode::Strict).unwrap();
+        assert_eq!(out, RecoveryOutcome::TranscriptOk);
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn recovery_missing_restores_from_archive_under_cascade() {
+        let project = "/tmp/aoe-recovery-archive";
+        let (_g, proj_dir) = isolated_claude_home(project);
+        let sid = "22222222-2222-2222-2222-222222222222";
+        let archive_dir = proj_dir.join("archived");
+        fs::create_dir_all(&archive_dir).unwrap();
+        let archive_path = archive_dir.join(format!("{sid}.jsonl.thrash-20260512-120000"));
+        build_archive_transcript(&archive_path);
+
+        let out =
+            recover_transcript_for_sid(sid, project, super::super::RecoveryMode::Cascade).unwrap();
         match out {
             RecoveryOutcome::RestoredFromArchive { archive } => {
                 assert_eq!(archive, archive_path);
@@ -440,48 +552,76 @@ mod tests {
 
     #[test]
     #[serial_test::serial]
-    fn recovery_missing_no_archive_returns_fresh_launch() {
+    fn recovery_strict_declines_to_restore_from_archive() {
+        let project = "/tmp/aoe-recovery-strict-archive";
+        let (_g, proj_dir) = isolated_claude_home(project);
+        let sid = "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb";
+        let archive_dir = proj_dir.join("archived");
+        fs::create_dir_all(&archive_dir).unwrap();
+        let archive_path = archive_dir.join(format!("{sid}.jsonl.thrash-20260512-120000"));
+        build_archive_transcript(&archive_path);
+
+        let out =
+            recover_transcript_for_sid(sid, project, super::super::RecoveryMode::Strict).unwrap();
+        assert_eq!(
+            out,
+            RecoveryOutcome::StrictSkipped {
+                reason: StrictSkipReason::MissingWithArchive,
+            }
+        );
+
+        // Live transcript must NOT have been written.
+        let live = proj_dir.join(format!("{sid}.jsonl"));
+        assert!(
+            !live.exists(),
+            "strict mode should not write {}",
+            live.display()
+        );
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn recovery_missing_no_archive_returns_fresh_launch_under_cascade() {
         let project = "/tmp/aoe-recovery-fresh";
         let (_g, _proj_dir) = isolated_claude_home(project);
         let sid = "33333333-3333-3333-3333-333333333333";
 
-        let out = recover_transcript_for_sid(sid, project).unwrap();
+        let out =
+            recover_transcript_for_sid(sid, project, super::super::RecoveryMode::Cascade).unwrap();
         assert_eq!(out, RecoveryOutcome::NoArchiveFreshLaunch);
     }
 
     #[test]
     #[serial_test::serial]
-    fn recovery_oversized_trims_in_place() {
+    fn recovery_strict_missing_no_archive_returns_strict_skipped() {
+        let project = "/tmp/aoe-recovery-strict-fresh";
+        let (_g, _proj_dir) = isolated_claude_home(project);
+        let sid = "cccccccc-cccc-cccc-cccc-cccccccccccc";
+
+        let out =
+            recover_transcript_for_sid(sid, project, super::super::RecoveryMode::Strict).unwrap();
+        assert_eq!(
+            out,
+            RecoveryOutcome::StrictSkipped {
+                reason: StrictSkipReason::MissingNoArchive,
+            }
+        );
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn recovery_oversized_trims_in_place_under_cascade() {
         let project = "/tmp/aoe-recovery-oversize";
         let (_g, proj_dir) = isolated_claude_home(project);
         let sid = "44444444-4444-4444-4444-444444444444";
         let live = proj_dir.join(format!("{sid}.jsonl"));
-
-        // Build a file larger than OVERSIZE_BYTES with a recognizable compact
-        // line we can verify post-trim.
-        let mut f = fs::File::create(&live).unwrap();
-        for i in 0..5 {
-            f.write_all(format!("{{\"hdr\":{i}}}\n").as_bytes())
-                .unwrap();
-        }
-        f.write_all(b"{\"compactMetadata\":{\"preTokens\":999,\"postTokens\":1}}\n")
-            .unwrap();
-        // Pad with junk past the oversize threshold.
-        let pad = "{\"junk\":\"".to_string() + &"x".repeat(1024) + "\"}\n";
-        let needed = (OVERSIZE_BYTES as usize / pad.len()) + 1;
-        for _ in 0..needed {
-            f.write_all(pad.as_bytes()).unwrap();
-        }
-        for i in 0..300 {
-            f.write_all(format!("{{\"tail\":{i}}}\n").as_bytes())
-                .unwrap();
-        }
-        drop(f);
+        build_oversize_transcript(&live);
 
         let original_size = fs::metadata(&live).unwrap().len();
         assert!(original_size > OVERSIZE_BYTES);
 
-        let out = recover_transcript_for_sid(sid, project).unwrap();
+        let out =
+            recover_transcript_for_sid(sid, project, super::super::RecoveryMode::Cascade).unwrap();
         match out {
             RecoveryOutcome::TrimmedInPlace {
                 original_lines,
@@ -500,12 +640,60 @@ mod tests {
 
     #[test]
     #[serial_test::serial]
+    fn recovery_strict_declines_to_trim_oversized() {
+        let project = "/tmp/aoe-recovery-strict-oversize";
+        let (_g, proj_dir) = isolated_claude_home(project);
+        let sid = "dddddddd-dddd-dddd-dddd-dddddddddddd";
+        let live = proj_dir.join(format!("{sid}.jsonl"));
+        build_oversize_transcript(&live);
+
+        let original_size = fs::metadata(&live).unwrap().len();
+        assert!(original_size > OVERSIZE_BYTES);
+
+        let out =
+            recover_transcript_for_sid(sid, project, super::super::RecoveryMode::Strict).unwrap();
+        assert_eq!(
+            out,
+            RecoveryOutcome::StrictSkipped {
+                reason: StrictSkipReason::Oversized,
+            }
+        );
+
+        let after_size = fs::metadata(&live).unwrap().len();
+        assert_eq!(
+            after_size, original_size,
+            "strict mode must not mutate bytes"
+        );
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn recovery_off_short_circuits_to_not_applicable() {
+        let project = "/tmp/aoe-recovery-off";
+        let (_g, proj_dir) = isolated_claude_home(project);
+        let sid = "eeeeeeee-eeee-eeee-eeee-eeeeeeeeeeee";
+        let live = proj_dir.join(format!("{sid}.jsonl"));
+        // Build a clearly oversized transcript so any cascade branch would mutate.
+        build_oversize_transcript(&live);
+        let before_size = fs::metadata(&live).unwrap().len();
+
+        let out =
+            recover_transcript_for_sid(sid, project, super::super::RecoveryMode::Off).unwrap();
+        assert_eq!(out, RecoveryOutcome::NotApplicable);
+
+        let after_size = fs::metadata(&live).unwrap().len();
+        assert_eq!(after_size, before_size, "off mode must not touch bytes");
+    }
+
+    #[test]
+    #[serial_test::serial]
     fn recovery_no_project_dir_is_not_applicable() {
         let temp = TempDir::new().unwrap();
         std::env::set_var("CLAUDE_CONFIG_DIR", temp.path().join(".claude"));
         let out = recover_transcript_for_sid(
             "55555555-5555-5555-5555-555555555555",
             "/tmp/nonexistent-aoe-project",
+            super::super::RecoveryMode::Cascade,
         )
         .unwrap();
         assert_eq!(out, RecoveryOutcome::NotApplicable);

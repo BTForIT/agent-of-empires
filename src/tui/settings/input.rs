@@ -656,6 +656,11 @@ impl SettingsView {
                     s.strict_hotkeys = None;
                 }
             }
+            FieldKey::RecoveryMode => {
+                if let Some(ref mut s) = config.session {
+                    s.recovery_mode = None;
+                }
+            }
             FieldKey::AgentExtraArgs => {
                 if let Some(ref mut s) = config.session {
                     s.agent_extra_args = None;

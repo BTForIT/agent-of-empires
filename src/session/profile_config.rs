@@ -230,6 +230,9 @@ pub struct SessionConfigOverride {
 
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub strict_hotkeys: Option<bool>,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recovery_mode: Option<super::recovery::RecoveryMode>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -440,6 +443,9 @@ pub fn apply_session_overrides(
     }
     if let Some(strict_hotkeys) = source.strict_hotkeys {
         target.strict_hotkeys = strict_hotkeys;
+    }
+    if let Some(recovery_mode) = source.recovery_mode {
+        target.recovery_mode = recovery_mode;
     }
 }
 

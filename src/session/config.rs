@@ -1,6 +1,7 @@
 //! User configuration management
 
 use super::get_app_dir;
+use super::recovery::RecoveryMode;
 use super::repo_config::HooksConfig;
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
@@ -382,6 +383,14 @@ pub struct SessionConfig {
     /// Off by default; existing users keep the legacy single-letter UX.
     #[serde(default)]
     pub strict_hotkeys: bool,
+
+    /// Transcript recovery aggressiveness at session restart.
+    /// `Strict` (default) never mutates transcript bytes; on oversized or missing
+    /// transcripts AoE falls back to a fresh launch. `Cascade` trims oversized
+    /// transcripts in place and restores from thrash archives. `Off` skips
+    /// recovery entirely and always launches fresh.
+    #[serde(default)]
+    pub recovery_mode: RecoveryMode,
 }
 
 impl SessionConfig {

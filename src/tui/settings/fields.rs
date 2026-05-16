@@ -87,6 +87,7 @@ pub enum FieldKey {
     // Session
     DefaultTool,
     StrictHotkeys,
+    RecoveryMode,
     AgentExtraArgs,
     AgentCommandOverride,
     AgentStatusHooks,
@@ -200,6 +201,24 @@ where
 {
     let s = section.get_or_insert_with(S::default);
     set_field(s, Some(new_value));
+}
+
+fn recovery_mode_index(mode: crate::session::recovery::RecoveryMode) -> usize {
+    use crate::session::recovery::RecoveryMode;
+    match mode {
+        RecoveryMode::Strict => 0,
+        RecoveryMode::Cascade => 1,
+        RecoveryMode::Off => 2,
+    }
+}
+
+fn recovery_mode_from_index(idx: usize) -> crate::session::recovery::RecoveryMode {
+    use crate::session::recovery::RecoveryMode;
+    match idx {
+        1 => RecoveryMode::Cascade,
+        2 => RecoveryMode::Off,
+        _ => RecoveryMode::Strict,
+    }
 }
 
 /// Parse a list of "key=value" strings into a HashMap.
@@ -1258,6 +1277,19 @@ fn build_session_fields(
         session.and_then(|s| s.strict_hotkeys),
     );
 
+    let (recovery_mode, recovery_mode_override) = resolve_value(
+        scope,
+        global.session.recovery_mode,
+        session.and_then(|s| s.recovery_mode),
+    );
+    let recovery_mode_options: Vec<String> = vec![
+        "strict".to_string(),
+        "cascade".to_string(),
+        "off".to_string(),
+    ];
+    let recovery_mode_selected = recovery_mode_index(recovery_mode);
+    let global_recovery_mode_selected = recovery_mode_index(global.session.recovery_mode);
+
     let (agent_status_hooks, status_hooks_override) = resolve_value(
         scope,
         global.session.agent_status_hooks,
@@ -1416,6 +1448,25 @@ fn build_session_fields(
             inherited_display: inherited_if(
                 strict_hotkeys_override,
                 FieldValue::Bool(global.session.strict_hotkeys),
+            ),
+        },
+        SettingField {
+            key: FieldKey::RecoveryMode,
+            label: "Recovery Mode",
+            description:
+                "Restart-time transcript recovery: strict (no byte mutation, fresh-launch on damage), cascade (trim + restore from archive), off (always fresh-launch)",
+            value: FieldValue::Select {
+                selected: recovery_mode_selected,
+                options: recovery_mode_options.clone(),
+            },
+            category: SettingsCategory::Session,
+            has_override: recovery_mode_override,
+            inherited_display: inherited_if(
+                recovery_mode_override,
+                FieldValue::Select {
+                    selected: global_recovery_mode_selected,
+                    options: recovery_mode_options,
+                },
             ),
         },
         SettingField {
@@ -1788,6 +1839,9 @@ fn apply_field_to_global(field: &SettingField, config: &mut Config) {
         }
         (FieldKey::YoloModeDefault, FieldValue::Bool(v)) => config.session.yolo_mode_default = *v,
         (FieldKey::StrictHotkeys, FieldValue::Bool(v)) => config.session.strict_hotkeys = *v,
+        (FieldKey::RecoveryMode, FieldValue::Select { selected, .. }) => {
+            config.session.recovery_mode = recovery_mode_from_index(*selected);
+        }
         (FieldKey::AgentStatusHooks, FieldValue::Bool(v)) => {
             config.session.agent_status_hooks = *v;
         }
@@ -2150,6 +2204,10 @@ fn apply_field_to_profile(field: &SettingField, _global: &Config, config: &mut P
         }
         (FieldKey::StrictHotkeys, FieldValue::Bool(v)) => {
             set_profile_override(*v, &mut config.session, |s, val| s.strict_hotkeys = val);
+        }
+        (FieldKey::RecoveryMode, FieldValue::Select { selected, .. }) => {
+            let mode = recovery_mode_from_index(*selected);
+            set_profile_override(mode, &mut config.session, |s, val| s.recovery_mode = val);
         }
         (FieldKey::AgentStatusHooks, FieldValue::Bool(v)) => {
             set_profile_override(*v, &mut config.session, |s, val| {

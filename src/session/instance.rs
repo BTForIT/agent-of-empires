@@ -1604,17 +1604,40 @@ impl Instance {
             Some(s) if !s.is_empty() => s.to_string(),
             _ => return,
         };
+        let mode = crate::session::config::Config::load()
+            .map(|c| c.session.recovery_mode)
+            .unwrap_or_default();
+        if matches!(mode, crate::session::recovery::RecoveryMode::Off) {
+            tracing::info!(
+                "restart '{}': recovery_mode=off; clearing session id so {} launches fresh",
+                self.title,
+                self.tool,
+            );
+            self.agent_session_id = None;
+            return;
+        }
         let harness = match crate::session::recovery::for_tool(&self.tool) {
             Some(h) => h,
             None => return,
         };
-        match harness.recover(&sid, &self.project_path) {
+        match harness.recover(&sid, &self.project_path, mode) {
             Ok(crate::session::recovery::RecoveryOutcome::NoArchiveFreshLaunch) => {
                 tracing::warn!(
                     "restart '{}': transcript missing and no archive for sid {}; \
                      clearing session id so {} launches fresh instead of failing on --resume",
                     self.title,
                     sid,
+                    self.tool,
+                );
+                self.agent_session_id = None;
+            }
+            Ok(crate::session::recovery::RecoveryOutcome::StrictSkipped { reason }) => {
+                tracing::warn!(
+                    "restart '{}': recovery_mode=strict declined to repair sid {} (reason={:?}); \
+                     clearing session id so {} launches fresh",
+                    self.title,
+                    sid,
+                    reason,
                     self.tool,
                 );
                 self.agent_session_id = None;
