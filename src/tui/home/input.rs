@@ -464,13 +464,11 @@ impl HomeView {
                 DialogResult::Cancel => {
                     self.restart_dialog = None;
                 }
-                DialogResult::Submit(_data) => {
-                    // Step 1a: dialog returns the picked (profile, tool) but
-                    // we restart in-place for now. Step 1b will route those
-                    // values into restart_selected_session for heavy respawn
-                    // with new env.
+                DialogResult::Submit(data) => {
                     self.restart_dialog = None;
-                    if let Err(e) = self.restart_selected_session() {
+                    let profile = data.profile.as_deref();
+                    let tool = data.tool.as_deref();
+                    if let Err(e) = self.restart_selected_session(profile, tool) {
                         tracing::error!("restart_selected_session failed: {}", e);
                     }
                 }
