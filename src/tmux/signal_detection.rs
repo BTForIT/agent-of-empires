@@ -15,6 +15,8 @@
 //! Companion design: docs/plans/2026-05-15-modular-harness-recovery-design.md
 //! (the cold-restart leg of the same per-agent contract).
 
+use serde::{Deserialize, Serialize};
+
 use super::utils::strip_ansi;
 
 /// A noteworthy event extracted from pane content. Zero or more per poll.
@@ -22,7 +24,11 @@ use super::utils::strip_ansi;
 /// Variants are non-exhaustive in practice (new ones will be added as new
 /// agent quirks are observed); callers should treat unknown shapes as a
 /// no-op rather than relying on a closed set.
-#[derive(Debug, Clone, PartialEq, Eq)]
+///
+/// Serialized as part of `session::Instance.last_signals` so the TUI and
+/// web dashboard can render badges without re-scanning pane content.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
 pub enum AgentSignal {
     /// Agent reports its usage limit is exhausted and no further requests
     /// will succeed until a reset window passes. `reset_at` carries the
@@ -110,7 +116,7 @@ fn parse_claude_reset_time(content: &str) -> Option<String> {
         if let Some(start) = content.to_lowercase().find(needle) {
             let after = &content[start + needle.len()..];
             let end = after
-                .find(|c: char| matches!(c, '.' | '\n' | ')'))
+                .find(['.', '\n', ')'])
                 .unwrap_or(after.len().min(40));
             let candidate = after[..end].trim();
             if !candidate.is_empty() {

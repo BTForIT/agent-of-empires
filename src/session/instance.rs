@@ -287,6 +287,14 @@ pub struct Instance {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cockpit_acp_session_id: Option<String>,
 
+    /// Noteworthy events extracted from the most recent pane scan, populated
+    /// by `tmux::detect_signals_from_content` during `update_status_with_metadata`.
+    /// Persisted so the TUI and web dashboard can render badges (e.g. "limits
+    /// exhausted, resets 11pm") without re-scanning pane content. Empty is the
+    /// normal case; cleared each poll, replaced atomically.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub last_signals: Vec<tmux::AgentSignal>,
+
     // Runtime state (not serialized)
     #[serde(skip)]
     pub last_error_check: Option<std::time::Instant>,
@@ -476,6 +484,7 @@ impl Instance {
             cockpit_model: None,
             #[cfg(feature = "serve")]
             cockpit_acp_session_id: None,
+            last_signals: Vec::new(),
             last_error_check: None,
             last_start_time: None,
             last_error: None,
@@ -1780,11 +1789,27 @@ impl Instance {
                 hook_status,
                 is_dead
             );
+            let detection_tool = if self.detect_as.is_empty() {
+                &self.tool
+            } else {
+                &self.detect_as
+            };
+            let hook_path_pane = session.capture_pane(20).unwrap_or_default();
+            let hook_path_signals =
+                tmux::detect_signals_from_content(&hook_path_pane, detection_tool);
+            if self.last_signals != hook_path_signals {
+                tracing::debug!(
+                    "signals '{}': {:?} -> {:?} (hook path)",
+                    self.title,
+                    self.last_signals,
+                    hook_path_signals,
+                );
+            }
+            self.last_signals = hook_path_signals;
             if is_dead {
                 self.status = Status::Error;
                 if self.last_error.is_none() {
-                    let pane_content = session.capture_pane(20).unwrap_or_default();
-                    self.last_error = Some(summarize_error_from_pane(&pane_content));
+                    self.last_error = Some(summarize_error_from_pane(&hook_path_pane));
                 }
             } else {
                 self.status = hook_status;
@@ -1800,6 +1825,16 @@ impl Instance {
             &self.detect_as
         };
         let detected = tmux::detect_status_from_content(&pane_content, detection_tool);
+        let detected_signals = tmux::detect_signals_from_content(&pane_content, detection_tool);
+        if self.last_signals != detected_signals {
+            tracing::debug!(
+                "signals '{}': {:?} -> {:?}",
+                self.title,
+                self.last_signals,
+                detected_signals,
+            );
+        }
+        self.last_signals = detected_signals;
         tracing::trace!(
             "status '{}': detected={:?}, cmd_override={}, custom_cmd={}",
             self.title,
