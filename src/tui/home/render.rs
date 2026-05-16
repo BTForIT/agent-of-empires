@@ -923,8 +923,6 @@ impl HomeView {
         }
 
         groups.push((2, mk(if strict { "N" } else { "n" }, "New")));
-        groups.push((4, mk(if strict { "A" } else { "a" }, "Pick")));
-        groups.push((4, mk(if strict { "B" } else { "b" }, "Batch")));
 
         if self.selected_session.is_some() {
             groups.push((3, mk(if strict { "M" } else { "m" }, "Msg")));
