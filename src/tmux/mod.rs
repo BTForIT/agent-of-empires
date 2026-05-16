@@ -9,7 +9,7 @@ mod terminal_session;
 pub(crate) mod utils;
 
 pub use session::Session;
-pub use signal_detection::{detect_signals_from_content, AgentSignal};
+pub use signal_detection::{detect_signals_from_content, AgentSignal, SignalSeverity};
 pub use status_bar::{get_session_info_for_current, get_status_for_current_session};
 pub use status_detection::detect_status_from_content;
 pub use terminal_session::{ContainerTerminalSession, TerminalSession};

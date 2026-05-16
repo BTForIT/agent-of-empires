@@ -13,6 +13,7 @@ use super::{
 };
 use crate::session::config::GroupByMode;
 use crate::session::{Item, Status};
+use crate::tmux;
 use crate::tui::components::{HelpOverlay, Preview};
 use crate::tui::responsive;
 use crate::tui::styles::Theme;
@@ -656,7 +657,22 @@ impl HomeView {
                     } else {
                         None
                     };
-                let badge_width = badge_text.map_or(0, |s| s.len());
+
+                // Signal badges (`[limits]`, `[auth]`, ...) ride along the
+                // right edge alongside any view-mode badge. Counted into
+                // `badge_width` so the activity column shifts left to make
+                // room rather than colliding. Blocking signals (limits,
+                // auth) take the error color, soft signals (ctx, rate) take
+                // the waiting color; ordering preserves detector output so
+                // the row reads in the order the events fired.
+                let signal_badges: Vec<(&'static str, tmux::SignalSeverity)> = inst
+                    .last_signals
+                    .iter()
+                    .map(|s| (s.badge_label(), s.severity()))
+                    .collect();
+                let signal_badges_width: usize =
+                    signal_badges.iter().map(|(l, _)| l.len() + 1).sum();
+                let badge_width = badge_text.map_or(0, |s| s.len()) + signal_badges_width;
 
                 let used_width: usize = line_spans.iter().map(|s| s.width()).sum();
                 let column_pad = activity_column_padding(used_width, list_width, badge_width);
@@ -687,6 +703,16 @@ impl HomeView {
 
                 if let Some(badge) = badge_text {
                     line_spans.push(Span::styled(badge, Style::default().fg(theme.sandbox)));
+                }
+                for (label, severity) in &signal_badges {
+                    let color = match severity {
+                        tmux::SignalSeverity::Blocking => theme.error,
+                        tmux::SignalSeverity::Soft => theme.waiting,
+                    };
+                    line_spans.push(Span::styled(
+                        format!(" {}", label),
+                        Style::default().fg(color),
+                    ));
                 }
                 if column_fits {
                     line_spans.push(Span::raw(" ".repeat(LAST_ACTIVITY_RIGHT_MARGIN)));

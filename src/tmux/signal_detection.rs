@@ -50,6 +50,42 @@ pub enum AgentSignal {
     RateLimited { retry_after_seconds: Option<u32> },
 }
 
+/// Visual urgency tier for a signal. Lets the TUI / web dashboard pick a
+/// color (error for blocking, warning for soft) without matching on the
+/// full enum at every render site.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SignalSeverity {
+    /// Blocks all further agent turns until user action (LimitsExhausted,
+    /// AuthRequired). Rendered with the error theme color.
+    Blocking,
+    /// Self-recoverable or transient (ContextFull, RateLimited). Rendered
+    /// with the waiting theme color.
+    Soft,
+}
+
+impl AgentSignal {
+    /// Short bracket-style label for the TUI session row, e.g. `[limits]`,
+    /// `[auth]`, `[ctx]`, `[rate]`. Kept short on purpose: session rows are
+    /// already dense and limits/auth are rare.
+    pub fn badge_label(&self) -> &'static str {
+        match self {
+            AgentSignal::LimitsExhausted { .. } => "[limits]",
+            AgentSignal::AuthRequired => "[auth]",
+            AgentSignal::ContextFull => "[ctx]",
+            AgentSignal::RateLimited { .. } => "[rate]",
+        }
+    }
+
+    pub fn severity(&self) -> SignalSeverity {
+        match self {
+            AgentSignal::LimitsExhausted { .. } | AgentSignal::AuthRequired => {
+                SignalSeverity::Blocking
+            }
+            AgentSignal::ContextFull | AgentSignal::RateLimited { .. } => SignalSeverity::Soft,
+        }
+    }
+}
+
 /// Dispatch by `tool` string to the per-agent detector registered on
 /// [`crate::agents::AgentDef`]. Returns an empty vec for unknown tools or
 /// agents with no registered detector (the shared [`no_signals`] no-op).
@@ -221,5 +257,61 @@ mod tests {
     fn parse_reset_time_missing() {
         let s = parse_claude_reset_time("nothing here");
         assert_eq!(s, None);
+    }
+
+    #[test]
+    fn badge_labels_are_terse() {
+        assert_eq!(
+            AgentSignal::LimitsExhausted { reset_at: None }.badge_label(),
+            "[limits]"
+        );
+        assert_eq!(AgentSignal::AuthRequired.badge_label(), "[auth]");
+        assert_eq!(AgentSignal::ContextFull.badge_label(), "[ctx]");
+        assert_eq!(
+            AgentSignal::RateLimited {
+                retry_after_seconds: None
+            }
+            .badge_label(),
+            "[rate]"
+        );
+    }
+
+    #[test]
+    fn severity_splits_blocking_from_soft() {
+        assert_eq!(
+            AgentSignal::LimitsExhausted { reset_at: None }.severity(),
+            SignalSeverity::Blocking
+        );
+        assert_eq!(
+            AgentSignal::AuthRequired.severity(),
+            SignalSeverity::Blocking
+        );
+        assert_eq!(
+            AgentSignal::ContextFull.severity(),
+            SignalSeverity::Soft
+        );
+        assert_eq!(
+            AgentSignal::RateLimited {
+                retry_after_seconds: None
+            }
+            .severity(),
+            SignalSeverity::Soft
+        );
+    }
+
+    #[test]
+    fn serde_round_trip_preserves_variant_data() {
+        let signals = vec![
+            AgentSignal::LimitsExhausted {
+                reset_at: Some("11pm".to_string()),
+            },
+            AgentSignal::AuthRequired,
+            AgentSignal::RateLimited {
+                retry_after_seconds: Some(30),
+            },
+        ];
+        let json = serde_json::to_string(&signals).expect("serialize");
+        let back: Vec<AgentSignal> = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(back, signals);
     }
 }
