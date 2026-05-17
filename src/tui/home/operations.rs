@@ -87,7 +87,22 @@ impl HomeView {
         Ok(session_id)
     }
 
-    pub(super) fn restart_selected_session(&mut self) -> anyhow::Result<()> {
+    /// Restart the selected session, optionally migrating to a new profile
+    /// and/or swapping the AI engine first.
+    ///
+    /// `new_profile`: when `Some(p)` and `p` differs from the current
+    /// `source_profile`, the session moves between profile storages. Mirrors
+    /// the profile-move path in `rename_selected` so a restart-with-different-
+    /// profile behaves the same as rename + restart.
+    ///
+    /// `new_tool`: when `Some(t)` and `t` differs from the current `tool`, the
+    /// field is updated before respawn so the new agent binary starts on the
+    /// next launch.
+    pub(super) fn restart_selected_session(
+        &mut self,
+        new_profile: Option<&str>,
+        new_tool: Option<&str>,
+    ) -> anyhow::Result<()> {
         let id = match &self.selected_session {
             Some(id) => id.clone(),
             None => return Ok(()),
@@ -98,6 +113,43 @@ impl HomeView {
         };
         if is_transient {
             return Ok(());
+        }
+
+        if let Some(target_tool) = new_tool {
+            let current_tool = self
+                .get_instance(&id)
+                .map(|i| i.tool.clone())
+                .unwrap_or_default();
+            if target_tool != current_tool {
+                self.mutate_instance(&id, |inst| {
+                    inst.tool = target_tool.to_string();
+                });
+            }
+        }
+
+        if let Some(target_profile) = new_profile {
+            let current_profile = self
+                .get_instance(&id)
+                .map(|i| i.source_profile.clone())
+                .unwrap_or_else(|| {
+                    self.active_profile
+                        .clone()
+                        .unwrap_or_else(|| "default".to_string())
+                });
+            if target_profile != current_profile {
+                let profiles = list_profiles()?;
+                if !profiles.contains(&target_profile.to_string()) {
+                    anyhow::bail!("Profile '{}' does not exist", target_profile);
+                }
+                if !self.storages.contains_key(target_profile) {
+                    self.storages
+                        .insert(target_profile.to_string(), Storage::new(target_profile)?);
+                }
+                self.mutate_instance(&id, |inst| {
+                    inst.source_profile = target_profile.to_string();
+                });
+                self.rebuild_group_trees();
+            }
         }
 
         let mut snapshot = match self.get_instance(&id) {
