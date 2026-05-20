@@ -581,6 +581,10 @@ impl HomeView {
                     let tool = data.tool.as_deref();
                     if let Err(e) = self.restart_selected_session(profile, tool) {
                         tracing::error!("restart_selected_session failed: {}", e);
+                        // Surface the failure so the user knows the restart
+                        // did not take; log-only left the TUI silent.
+                        self.info_dialog =
+                            Some(InfoDialog::new("Restart Failed", &format!("{}", e)));
                     }
                 }
             }
@@ -782,12 +786,12 @@ impl HomeView {
                 self.view_mode = ViewMode::Agent;
             }
             KeyCode::Char('q') => return Some(Action::Quit),
-            // `w` / `W` — toggle snooze on the cursor's session. Snooze is
+            // `w` / `W`: toggle snooze on the cursor's session. Snooze is
             // "temporary archive": the row sinks to tier 99 for `config.
             // session.snooze_duration_minutes` (default 30), renders
             // italic+dim with a `z ` prefix and remaining-time in the age
             // column, then rejoins the active Attention sort when the
-            // timer elapses (lazy — `is_snoozed()` just compares against
+            // timer elapses (lazy: `is_snoozed()` just compares against
             // now). Pressing w/W on a snoozed row wakes it immediately.
             // Mnemonic: Wait. Separate namespace from archive (`z`/`Z`)
             // and favorite (`f`/`F`). Session-only for v1.
@@ -801,11 +805,11 @@ impl HomeView {
                     tracing::error!("toggle_snooze_at_cursor failed: {}", e);
                 }
             }
-            // `h` / `H` — alias for `w` / `W` (snooze). Mnemonic: Hide,
+            // `h` / `H`: alias for `w` / `W` (snooze). Mnemonic: Hide,
             // borrowed from email-app conventions where H snoozes the
             // focused message off the list for a while. Plain `h` was
             // previously a vim-style left/collapse alias, but ← already
-            // covers that — and users with email-app muscle memory keep
+            // covers that, and users with email-app muscle memory keep
             // reaching for H expecting snooze. `w`/`W` stays functional
             // for backward compat; `h`/`H` is the advertised binding.
             KeyCode::Char('h') if !self.strict_hotkeys => {
@@ -1051,6 +1055,8 @@ impl HomeView {
                         "Please Wait",
                         "A session is already being created. Wait for it to finish or press Ctrl+C to cancel.",
                     ));
+                } else if !self.available_tools.any_available() {
+                    self.show_no_agents();
                 } else {
                     let existing_groups: Vec<String> =
                         self.all_groups().iter().map(|g| g.path.clone()).collect();
@@ -1150,6 +1156,8 @@ impl HomeView {
                         "Please Wait",
                         "A session is already being created. Wait for it to finish or press Ctrl+C to cancel.",
                     ));
+                } else if !self.available_tools.any_available() {
+                    self.show_no_agents();
                 } else {
                     let prefill_path = self
                         .selected_session
@@ -1807,19 +1815,10 @@ impl HomeView {
                     }
                 }
             }
-            // Upstream PR #796 added `w` for jump-to-next-waiting after the
-            // snooze feature (a19337b) had already taken `w`/`W`. In non-strict
-            // mode the snooze arm at line 707 catches first, so this jump arm
-            // was always dead. In strict mode it leaked through and preempted
-            // the typing-guard below — bare `w` jumped the cursor instead of
-            // opening compose like every other lowercase letter. Gate it.
-            KeyCode::Char('w') if !self.strict_hotkeys => {
-                self.jump_to_next_waiting();
-            }
             // Strict-mode typing guard: any bare lowercase letter that isn't a
-            // navigation key (j/k/h/l) is treated as inadvertent typing — open
-            // the compose dialog pre-filled with that character instead of
-            // firing an action or swallowing the keypress.
+            // navigation key (j/k/h/l) is treated as inadvertent typing,
+            // opening the compose dialog pre-filled with that character
+            // instead of firing an action or swallowing the keypress.
             KeyCode::Char(c)
                 if self.strict_hotkeys
                     && key.modifiers == KeyModifiers::NONE
@@ -1965,80 +1964,6 @@ impl HomeView {
         }
     }
 
-    fn jump_to_next_waiting(&mut self) {
-        let len = self.flat_items.len();
-        if len == 0 {
-            return;
-        }
-
-        // Pass 1: forward-walk from cursor+1, wrapping, for the next Waiting
-        // session OR a freshly-stopped Idle session (within
-        // `idle_decay_window`). Both states are "needs your attention" and
-        // cycle together so repeated `w` taps move through the actionable
-        // backlog regardless of which hook fired.
-        let window = self.idle_decay_window;
-        let start = (self.cursor + 1) % len;
-        for i in 0..len - 1 {
-            let idx = (start + i) % len;
-            let id = match self.flat_items.get(idx) {
-                Some(Item::Session { id, .. }) => id.clone(),
-                _ => continue,
-            };
-            if let Some(inst) = self.get_instance(&id) {
-                let is_actionable = inst.status == Status::Waiting
-                    || matches!(inst.idle_age(), Some(age) if age < window);
-                if is_actionable {
-                    self.cursor = idx;
-                    self.update_selected();
-                    return;
-                }
-            }
-        }
-
-        // Pass 2: fall back to the most-recently-accessed Idle session, skipping
-        // the cursor. Sessions never attached (last_accessed_at == None) rank
-        // last but remain eligible.
-        let mut best: Option<(usize, Option<chrono::DateTime<chrono::Utc>>)> = None;
-        for idx in 0..len {
-            if idx == self.cursor {
-                continue;
-            }
-            let id = match self.flat_items.get(idx) {
-                Some(Item::Session { id, .. }) => id.clone(),
-                _ => continue,
-            };
-            let Some(inst) = self.get_instance(&id) else {
-                continue;
-            };
-            if inst.status != Status::Idle {
-                continue;
-            }
-            let ts = inst.last_accessed_at;
-            let beats = match best {
-                None => true,
-                Some((_, b)) => match (ts, b) {
-                    (Some(a), Some(b)) => a > b,
-                    (Some(_), None) => true,
-                    (None, _) => false,
-                },
-            };
-            if beats {
-                best = Some((idx, ts));
-            }
-        }
-
-        if let Some((idx, _)) = best {
-            self.cursor = idx;
-            self.update_selected();
-            return;
-        }
-
-        self.info_dialog = Some(InfoDialog::new(
-            "No Available Sessions",
-            "No sessions are currently waiting or idle.",
-        ));
-    }
-
     pub(super) fn move_cursor(&mut self, delta: i32) {
         if self.flat_items.is_empty() {
             return;
@@ -2157,7 +2082,7 @@ impl HomeView {
         if !self.hit_preview(col, row) {
             return false;
         }
-        // Wheel over preview with no session selected — fall through to list nav.
+        // Wheel over preview with no session selected: fall through to list nav.
         if self.selected_session.is_none() {
             self.move_cursor(-1);
             return true;
@@ -2192,7 +2117,7 @@ impl HomeView {
         let new_offset = self.preview_scroll_offset.saturating_add(STEP);
         let clamped = new_offset.min(real_max);
         if clamped == self.preview_scroll_offset {
-            // Preview already at top — fall through to list nav so the wheel isn't a no-op.
+            // Preview already at top: fall through to list nav so the wheel isn't a no-op.
             self.move_cursor(-1);
             return true;
         }
@@ -2200,7 +2125,7 @@ impl HomeView {
         true
     }
 
-    /// Route a mouse-wheel-down at (col, row) — see handle_scroll_up.
+    /// Route a mouse-wheel-down at (col, row); see handle_scroll_up.
     pub fn handle_scroll_down(&mut self, col: u16, row: u16) -> bool {
         const STEP: u16 = 3;
         if let Some(ref mut diff) = self.diff_view {
@@ -2217,13 +2142,13 @@ impl HomeView {
         if !self.hit_preview(col, row) {
             return false;
         }
-        // Wheel over preview with no session selected — fall through to list nav.
+        // Wheel over preview with no session selected: fall through to list nav.
         if self.selected_session.is_none() {
             self.move_cursor(1);
             return true;
         }
         if self.preview_scroll_offset == 0 {
-            // Preview already at bottom — fall through to list nav so the wheel isn't a no-op.
+            // Preview already at bottom: fall through to list nav so the wheel isn't a no-op.
             self.move_cursor(1);
             return true;
         }
@@ -2371,7 +2296,7 @@ impl HomeView {
     }
 
     /// Strict-mode typing guard: a bare lowercase letter was pressed outside
-    /// navigation (j/k/h/l). Treat it as inadvertent typing — open the compose
+    /// navigation (j/k/h/l). Treat it as inadvertent typing: open the compose
     /// dialog for the selected session pre-filled with that character. Mirrors
     /// handle_paste's dialog-delegation + fallback logic.
     fn capture_letter_to_compose(&mut self, c: char) {
@@ -2613,7 +2538,7 @@ impl HomeView {
             // Side benefit: passing through unchanged also makes the chords work
             // on iOS Mosh, where Shift+letter is delivered as the bare uppercase
             // keycode without a Shift modifier.
-            // Bare lowercase letters pass through — the main match falls through
+            // Bare lowercase letters pass through; the main match falls through
             // to a catch-all that opens the compose dialog pre-filled with the
             // letter (strict-mode typing-guard). Navigation keys j/k/h/l are
             // handled by their own arms before the catch-all fires.

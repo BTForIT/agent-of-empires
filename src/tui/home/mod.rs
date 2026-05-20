@@ -1719,7 +1719,7 @@ impl HomeView {
     /// The detector exists to solve the home-view shortcut-shadowing problem:
     /// Mosh strips bracketed-paste markers, so a pasted stream of `KeyCode::Char`
     /// events would fire `n`/`d`/`r`/etc. shortcuts on the home view. When a
-    /// dialog captures keys into a text input, those shortcuts don't fire —
+    /// dialog captures keys into a text input, those shortcuts don't fire,
     /// but the dialog also won't receive a synthesized `Paste` event unless
     /// it routes through `handle_paste`. Bursting through a dialog that only
     /// handles `Key` events strands the text in `pending_paste` and leaves
@@ -1727,7 +1727,7 @@ impl HomeView {
     ///
     /// So: burst is safe when no dialog is open (home shortcuts at risk) or
     /// when one of the four paste-routed dialogs is open (rename / send_message
-    /// / new / settings — each forwards to `handle_paste`). For every other
+    /// / new / settings; each forwards to `handle_paste`). For every other
     /// dialog (command palette, profile picker, projects, info, etc.) keys
     /// must dispatch individually so the dialog input receives them.
     pub fn wants_paste_burst(&self) -> bool {
@@ -2020,7 +2020,10 @@ impl HomeView {
             tracing::error!("Failed to save after send: {}", e);
         }
         if self.sort_order == crate::session::config::SortOrder::Attention {
-            self.select_top_attention(None);
+            // Skip the just-sent session so the cursor lands on the next row
+            // that actually needs attention; stamp_last_accessed bumped this
+            // one to the top of its tier.
+            self.select_top_attention(Some(session_id));
             self.selected_session = None;
         }
         stale_sid

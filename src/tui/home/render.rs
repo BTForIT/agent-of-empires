@@ -357,7 +357,7 @@ impl HomeView {
 
         // Each Option<Dialog> field on HomeView gets the same render dispatch:
         // if present, call render(frame, area, theme). Macro-collapsed to keep
-        // the list of active dialog types in one place — adding a new dialog
+        // the list of active dialog types in one place; adding a new dialog
         // means adding one line here, not stamping out another five-line
         // if-let block.
         macro_rules! render_dialogs {
@@ -1522,7 +1522,7 @@ impl HomeView {
         // Pending-paste indicator: text was captured at the home view but
         // couldn't be routed yet (no runnable session selected). Surface a
         // high-priority hint so the user knows the paste/dictation didn't
-        // vanish — pressing `m` after selecting a runnable session drains
+        // vanish: pressing `m` after selecting a runnable session drains
         // pending_paste into the compose dialog.
         if let Some(buf) = &self.pending_paste {
             if !buf.is_empty() {
@@ -1547,7 +1547,7 @@ impl HomeView {
             // U+21B5 (↵) renders Enter/Return in one cell across most fonts;
             // saves 4 cols vs the literal word and matches k9s/lazygit/fzf
             // conventions. Trailing space inside the key string adds a second
-            // visual gap before the description — at most fonts the arrow
+            // visual gap before the description, at most fonts the arrow
             // glyph fills its cell tightly and a single mk-internal space
             // looks too close to the desc.
             groups.push((0, mk("↵ ", enter_action_text)));
@@ -1577,7 +1577,7 @@ impl HomeView {
         // Priority 1: user's core daily workflow (message / archive / fav /
         // snooze). These survive the greedy pack under narrow-pane widths
         // (iPad Termius / Moshi ~80 cols) because they're the actions the
-        // user reaches for most often. Restart / Del stay at p3 — less
+        // user reaches for most often. Restart / Del stay at p3, less
         // frequent, OK to drop first.
         if self.selected_session.is_some() {
             groups.push((1, mk(if strict { "M" } else { "m" }, "Msg")));
@@ -1596,7 +1596,7 @@ impl HomeView {
         groups.push((4, mk(if strict { "^D" } else { "D" }, "Diff")));
         // Mouse capture is enabled globally, which disables the terminal's
         // native drag-to-select. Surface the modifier-key workaround so users
-        // don't think copy-paste is broken. Moderate priority — useful but not
+        // don't think copy-paste is broken. Moderate priority: useful but not
         // critical, drops on narrow panes before ? / Quit.
         groups.push((2, mk("\u{2325}/Shift+drag", "Select")));
         groups.push((1, mk("^K", "Cmds")));
@@ -1916,7 +1916,7 @@ mod tests {
     #[test]
     fn activity_column_padding_long_title_with_badge_hides_column() {
         // The badge by itself fits but the column doesn't. The decision
-        // is per-row "show the column or not" — the badge gets its own
+        // is per-row "show the column or not"; the badge gets its own
         // unconditional render path.
         // prefix(20) + slot(6) + badge(12) + margin(1) = 39 > 35.
         assert_eq!(activity_column_padding(20, 35, 12), None);

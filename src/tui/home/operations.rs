@@ -149,6 +149,10 @@ impl HomeView {
                     inst.source_profile = target_profile.to_string();
                 });
                 self.rebuild_group_trees();
+                // Rebuild the visible row list too; otherwise the row still
+                // renders under the old profile until the next reload, and
+                // any follow-up keybind hits stale cursor state.
+                self.flat_items = self.build_flat_items();
             }
         }
 
@@ -158,8 +162,20 @@ impl HomeView {
         };
         snapshot.restart_with_size(crate::terminal::get_size())?;
 
+        // restart_with_size mutates more than just status on the snapshot
+        // (timestamps, recovery markers, agent session id). Earlier this only
+        // copied `status` back, so the stored Instance kept stale recovery
+        // state until the next poller cycle. Mirror every restart-relevant
+        // field so the in-memory and persisted state line up immediately.
         self.mutate_instance(&id, |inst| {
             inst.status = snapshot.status;
+            inst.last_accessed_at = snapshot.last_accessed_at;
+            inst.last_start_time = snapshot.last_start_time;
+            inst.last_error = snapshot.last_error.clone();
+            inst.last_error_check = snapshot.last_error_check;
+            inst.agent_session_id = snapshot.agent_session_id.clone();
+            inst.pane_dead_observed = snapshot.pane_dead_observed;
+            inst.idle_entered_at = snapshot.idle_entered_at;
         });
         self.save()?;
 
@@ -697,7 +713,9 @@ impl HomeView {
         self.save()?;
         self.flat_items = self.build_flat_items();
         if self.sort_order == crate::session::config::SortOrder::Attention {
-            self.select_top_attention(None);
+            // Skip the just-snoozed row; sinking it should hand focus to the
+            // next needs attention item, not bounce back to the sunk one.
+            self.select_top_attention(Some(id));
         }
         Ok(Some(format!(
             "Snoozed for {}: {}",
@@ -781,7 +799,9 @@ impl HomeView {
         self.save()?;
         self.flat_items = self.build_flat_items();
         if self.sort_order == crate::session::config::SortOrder::Attention {
-            self.select_top_attention(None);
+            // Skip the just-archived session so focus lands on the next row
+            // that actually needs attention, not back on the dismissed one.
+            self.select_top_attention(Some(&id));
         }
         Ok(Some(format!("Archived: {}", title)))
     }

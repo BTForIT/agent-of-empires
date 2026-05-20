@@ -73,7 +73,7 @@ pub struct App {
     /// User dismissed the update bar this session. Resets when the
     /// process exits; on next launch the startup check runs again and
     /// the bar reappears if an update is still available. In-memory
-    /// only — no config persistence.
+    /// only; no config persistence.
     update_bar_dismissed: bool,
     /// Held in an Option so `with_raw_mode_disabled` can drop it before
     /// spawning child processes. Crossterm's EventStream runs a background
@@ -200,9 +200,10 @@ impl App {
             update_status_rx: None,
             update_bar_dismissed: false,
             event_stream: Some(EventStream::new()),
-            // Initial state matches whatever `tui::run` did at startup —
-            // capture is enabled iff AOE_MOUSE_CAPTURE=1.
-            mouse_captured: crate::tui::mouse_capture_requested(),
+            // Initial state matches whatever `tui::run` did at startup;
+            // capture is enabled iff AOE_MOUSE_CAPTURE=1 AND not running over
+            // Mosh (which mangles mouse-tracking escapes).
+            mouse_captured: crate::tui::mouse_capture_active(),
             #[cfg(feature = "serve")]
             pending_cockpit_open: None,
         })
@@ -219,11 +220,12 @@ impl App {
         &mut self,
         terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>,
     ) -> Result<()> {
-        // Mouse capture is opt-in (AOE_MOUSE_CAPTURE=1). Without the env, we
-        // never enable xterm mouse tracking — iOS Mosh + Termius/Blink rely
-        // on the terminal app's native scrollback for touch-scroll, and Mosh
-        // doesn't reliably forward mouse-tracking escapes to mobile clients.
-        if !crate::tui::mouse_capture_requested() {
+        // Mouse capture is opt-in (AOE_MOUSE_CAPTURE=1) and additionally
+        // suppressed under Mosh (MOSH_CONNECTION set), which mangles
+        // mouse-tracking escapes. Without an active capture, never toggle
+        // tracking; iOS Mosh + Termius/Blink rely on the terminal app's
+        // native scrollback for touch-scroll.
+        if !crate::tui::mouse_capture_active() {
             return Ok(());
         }
         let desired = !self.home.wants_text_selection();
@@ -284,7 +286,7 @@ impl App {
             DisableBracketedPaste,
             crossterm::cursor::Show
         )?;
-        if crate::tui::mouse_capture_requested() {
+        if crate::tui::mouse_capture_active() {
             crossterm::execute!(terminal.backend_mut(), DisableMouseCapture)?;
         }
         self.mouse_captured = false;
@@ -379,7 +381,7 @@ impl App {
     pub fn set_theme(&mut self, name: &str) {
         // Honor the saved color_mode (Palette vs Truecolor). If we don't, a
         // SetTheme dispatched from the Settings view preview/apply flow will
-        // re-load the theme with raw RGB colors — "breaking the coloration"
+        // re-load the theme with raw RGB colors, "breaking the coloration"
         // on terminals that were working with the user's palette preference
         // (Termius/mosh edge cases, 8-bit-only TTYs, etc.).
         let palette_mode = crate::session::resolve_config(
@@ -500,8 +502,8 @@ impl App {
                             //
                             // Only fire when home accepts paste routing
                             // (`wants_paste_burst`). Non-paste-aware dialogs
-                            // — command palette, profile picker, projects,
-                            // info, etc. — capture text via `handle_key`
+                            // (command palette, profile picker, projects,
+                            // info, etc.) capture text via `handle_key`
                             // only; bursting through them strands the input
                             // in `pending_paste` and leaves the dialog empty.
                             // CI caught this regression with e2e harnesses
@@ -969,7 +971,7 @@ impl App {
                 // "close aoe now" button. Even if a session creation is still in
                 // flight, cleanup_pending_creation() on shutdown cancels the hook
                 // and clears orphaned stubs (orphans are also swept on next
-                // launch — see home/mod.rs:820). No confirmation prompt.
+                // launch; see home/mod.rs:820). No confirmation prompt.
                 self.should_quit = true;
                 return Ok(());
             }
@@ -1272,7 +1274,7 @@ impl App {
             tracing::error!("Failed to save after attach-return: {}", e);
         }
         // In Attention sort, jump cursor to the top-attention row instead of
-        // pinning it to the session we just came from — that session has
+        // pinning it to the session we just came from; that session has
         // typically been bumped down a tier (Waiting → Running) and the next
         // item needing attention is now at row 0.
         if self.home.sort_order() == crate::session::config::SortOrder::Attention {

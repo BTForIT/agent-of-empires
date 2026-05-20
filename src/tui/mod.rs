@@ -41,6 +41,19 @@ pub fn mouse_capture_requested() -> bool {
         .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
         .unwrap_or(false)
 }
+
+/// Whether to actually issue mouse-capture escapes, combining the opt-in env
+/// (`AOE_MOUSE_CAPTURE=1`) with the Mosh suppression. Mosh mangles xterm
+/// mouse-tracking escapes (inverted/duplicated scroll on Termius, Blink,
+/// Mosh4iOS; broken right-click selection on desktop Mosh). `MOSH_CONNECTION`
+/// is set by mosh-server and propagates through the user's environment;
+/// when present, fall back to the terminal's native scroll regardless of
+/// `AOE_MOUSE_CAPTURE`. Every site that toggles mouse capture (startup,
+/// teardown, sync_mouse_capture, with_raw_mode_disabled) must gate on this
+/// helper, not on `mouse_capture_requested()` alone.
+pub fn mouse_capture_active() -> bool {
+    mouse_capture_requested() && std::env::var_os("MOSH_CONNECTION").is_none()
+}
 use crate::session::get_update_settings;
 use crate::update::check_for_update;
 
@@ -132,8 +145,7 @@ pub async fn run(profile: &str, startup_warning: Option<String>) -> Result<()> {
     // is set by mosh-server and propagates through the user's environment;
     // when present, fall back to the terminal's native scroll regardless of
     // AOE_MOUSE_CAPTURE so the user can select text without aoe eating events.
-    let mosh_active = std::env::var_os("MOSH_CONNECTION").is_some();
-    if mouse_capture_requested() && !mosh_active {
+    if mouse_capture_active() {
         execute!(stdout, EnableMouseCapture)?;
     }
     let backend = CrosstermBackend::new(stdout);
@@ -175,7 +187,7 @@ pub async fn run(profile: &str, startup_warning: Option<String>) -> Result<()> {
         LeaveAlternateScreen,
         DisableBracketedPaste
     )?;
-    if mouse_capture_requested() && !mosh_active {
+    if mouse_capture_active() {
         execute!(terminal.backend_mut(), DisableMouseCapture)?;
     }
     terminal.show_cursor()?;
