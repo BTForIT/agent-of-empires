@@ -3,14 +3,46 @@
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::mpsc;
 use std::sync::mpsc::RecvTimeoutError;
+use std::sync::LazyLock;
 use std::thread::JoinHandle;
 use std::time::Duration;
 
 /// Global count of active poller threads for budget enforcement
 static ACTIVE_POLLER_COUNT: AtomicU32 = AtomicU32::new(0);
 
-/// Maximum number of concurrent poller threads allowed
-const MAX_POLLER_THREADS: u32 = 20;
+/// Default ceiling on concurrent poller threads.
+///
+/// Bumped from 20 to 50 because fleets running ≥20 long-lived sessions
+/// (common for users running per-account/per-feature workspaces) hit the
+/// old cap; any session past the cap had no poller, so its hook-status
+/// file under `/tmp/aoe-hooks/<id>/` was never read and the TUI never
+/// updated the row -- "lost orange" / "stuck running" symptoms.
+const DEFAULT_MAX_POLLER_THREADS: u32 = 50;
+
+/// Environment variable override for the poller-thread ceiling.
+/// Set to a positive integer to raise/lower the cap at process start.
+const MAX_POLLER_THREADS_ENV: &str = "AOE_MAX_POLLER_THREADS";
+
+/// Parse the env override, falling back to `DEFAULT_MAX_POLLER_THREADS`
+/// on missing/empty/zero/non-numeric values. Pure function so it's testable.
+fn parse_max_poller_threads(env_value: Option<&str>) -> u32 {
+    env_value
+        .and_then(|raw| raw.trim().parse::<u32>().ok())
+        .filter(|n| *n > 0)
+        .unwrap_or(DEFAULT_MAX_POLLER_THREADS)
+}
+
+/// Resolved ceiling, computed once at first access from the process env.
+static MAX_POLLER_THREADS: LazyLock<u32> = LazyLock::new(|| {
+    let resolved = parse_max_poller_threads(std::env::var(MAX_POLLER_THREADS_ENV).ok().as_deref());
+    if resolved != DEFAULT_MAX_POLLER_THREADS {
+        tracing::info!(target: "session.create",
+            "Poller thread budget set to {} via {}",
+            resolved, MAX_POLLER_THREADS_ENV
+        );
+    }
+    resolved
+});
 
 /// RAII guard that decrements `ACTIVE_POLLER_COUNT` on drop.
 ///
@@ -21,9 +53,10 @@ struct PollerCountGuard;
 impl PollerCountGuard {
     /// Atomically check the budget and increment. Returns `None` if at capacity.
     fn try_acquire() -> Option<Self> {
+        let cap = *MAX_POLLER_THREADS;
         let mut current = ACTIVE_POLLER_COUNT.load(Ordering::SeqCst);
         loop {
-            if current >= MAX_POLLER_THREADS {
+            if current >= cap {
                 return None;
             }
             match ACTIVE_POLLER_COUNT.compare_exchange_weak(
@@ -33,7 +66,12 @@ impl PollerCountGuard {
                 Ordering::SeqCst,
             ) {
                 Ok(_) => return Some(Self),
-                Err(actual) => current = actual,
+                Err(actual) => {
+                    current = actual;
+                    if current >= cap {
+                        return None;
+                    }
+                }
             }
         }
     }
@@ -178,10 +216,12 @@ impl SessionPoller {
             Some(g) => g,
             None => {
                 tracing::warn!(target: "session.create",
-                    "Poller thread budget exhausted ({}/{}), skipping poller for {}",
+                    "Poller thread budget exhausted ({}/{}), skipping poller for {} \
+                     -- raise with {}=<n>",
                     ACTIVE_POLLER_COUNT.load(Ordering::SeqCst),
-                    MAX_POLLER_THREADS,
-                    instance_id
+                    *MAX_POLLER_THREADS,
+                    instance_id,
+                    MAX_POLLER_THREADS_ENV,
                 );
                 self.cmd_rx = Some(cmd_rx);
                 return false;
@@ -297,6 +337,51 @@ mod tests {
     use super::*;
     use serial_test::serial;
     use std::sync::{Arc, Mutex};
+
+    #[test]
+    fn test_parse_max_poller_threads_default_when_unset() {
+        assert_eq!(parse_max_poller_threads(None), DEFAULT_MAX_POLLER_THREADS);
+    }
+
+    #[test]
+    fn test_parse_max_poller_threads_default_when_empty() {
+        assert_eq!(
+            parse_max_poller_threads(Some("")),
+            DEFAULT_MAX_POLLER_THREADS
+        );
+        assert_eq!(
+            parse_max_poller_threads(Some("   ")),
+            DEFAULT_MAX_POLLER_THREADS
+        );
+    }
+
+    #[test]
+    fn test_parse_max_poller_threads_default_when_zero() {
+        // Zero would deadlock all sessions; fall back to default.
+        assert_eq!(
+            parse_max_poller_threads(Some("0")),
+            DEFAULT_MAX_POLLER_THREADS
+        );
+    }
+
+    #[test]
+    fn test_parse_max_poller_threads_default_when_non_numeric() {
+        assert_eq!(
+            parse_max_poller_threads(Some("abc")),
+            DEFAULT_MAX_POLLER_THREADS
+        );
+        assert_eq!(
+            parse_max_poller_threads(Some("-5")),
+            DEFAULT_MAX_POLLER_THREADS
+        );
+    }
+
+    #[test]
+    fn test_parse_max_poller_threads_accepts_positive() {
+        assert_eq!(parse_max_poller_threads(Some("100")), 100);
+        assert_eq!(parse_max_poller_threads(Some("  42  ")), 42);
+        assert_eq!(parse_max_poller_threads(Some("1")), 1);
+    }
 
     #[test]
     fn test_adaptive_interval_initial() {
@@ -472,7 +557,7 @@ mod tests {
     #[serial]
     fn test_thread_budget_cap() {
         let original = ACTIVE_POLLER_COUNT.load(Ordering::SeqCst);
-        ACTIVE_POLLER_COUNT.store(MAX_POLLER_THREADS, Ordering::SeqCst);
+        ACTIVE_POLLER_COUNT.store(*MAX_POLLER_THREADS, Ordering::SeqCst);
 
         let mut poller = SessionPoller::new("test-session".to_string());
         poller.start(
