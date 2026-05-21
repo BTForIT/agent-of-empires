@@ -208,6 +208,14 @@
       "components": ["web/src/components/DeleteSessionDialog.tsx"]
     },
     {
+      "id": "sidebar.favorite-indicator",
+      "kind": "deferred",
+      "issue": "https://github.com/njbrake/agent-of-empires/issues/1220",
+      "reason": "follow-up: add Vitest/RTL coverage for sidebar favorite indicator (amber star + font-semibold driven by workspace.sessions.some(s => s.favorited))",
+      "risk": "low",
+      "components": ["web/src/components/WorkspaceSidebar.tsx"]
+    },
+    {
       "id": "right-panel.diff",
       "kind": "deferred",
       "issue": "https://github.com/njbrake/agent-of-empires/issues/1221",
