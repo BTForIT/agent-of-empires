@@ -195,7 +195,7 @@ pub struct Supervisor<S: BroadcastSink> {
     /// Session ids whose in-flight `spawn` should bail out instead of
     /// inserting the freshly-spawned WorkerHandle. Set by `shutdown`
     /// when it observes a session that's in `pending_resumes` but not
-    /// yet in `workers` — without this, a `cockpit_disable` arriving
+    /// yet in `workers`; without this, a `cockpit_disable` arriving
     /// during the 2-3s ACP handshake would no-op (shutdown returns
     /// UnknownSession) but the in-flight spawn would still complete a
     /// few seconds later, producing an orphaned worker the user can no
@@ -2821,7 +2821,7 @@ mod tests {
         let sup = Supervisor::new(sink);
         // Simulate "spawn in flight": session is in pending_resumes
         // but no WorkerHandle yet. This is the exact window where
-        // the bug used to bite — shutdown returned UnknownSession
+        // the bug used to bite: shutdown returned UnknownSession
         // and the late spawn completion installed an orphan.
         sup.pending_resumes
             .lock()

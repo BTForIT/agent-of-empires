@@ -95,13 +95,18 @@ pub async fn run(profile: &str, args: SendArgs) -> Result<()> {
     // (see Instance::touch_last_accessed), so a user can wake any sunk row by
     // sending to it.
     let id_for_save = session_id.clone();
-    storage.update(|instances, _groups| {
+    if let Err(err) = storage.update(|instances, _groups| {
         if let Some(inst) = instances.iter_mut().find(|i| i.id == id_for_save) {
             inst.touch_last_accessed();
             inst.status = crate::session::Status::Running;
         }
         Ok(())
-    })?;
+    }) {
+        tracing::warn!(
+            ?err,
+            "send: failed to update session status after successful send"
+        );
+    }
 
     println!("Sent message to '{}'", session_title);
     Ok(())
