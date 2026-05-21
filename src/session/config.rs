@@ -554,8 +554,8 @@ pub struct SessionConfig {
 
     /// How long (in minutes) to snooze a session when the user presses
     /// `w`/`W` or runs `aoe session snooze`. During the snooze window the
-    /// session is treated like archive — sinks to the bottom, renders
-    /// italic+dim with a `z ` prefix, ignored by the attention sort —
+    /// session is treated like archive, sinks to the bottom, renders
+    /// italic+dim with a `z ` prefix, ignored by the attention sort,
     /// then rejoins the active list automatically when the timer expires.
     /// Default: 30 minutes.
     #[serde(default = "default_snooze_duration_minutes")]
