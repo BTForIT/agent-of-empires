@@ -199,7 +199,7 @@ impl HomeView {
 
         let worker_session_id = session_id.clone();
         let worker_title = title.clone();
-        let _ = std::thread::Builder::new()
+        if let Err(err) = std::thread::Builder::new()
             .name(format!("aoe-restart-wake/{}", session_id))
             .stack_size(128 * 1024)
             .spawn(move || {
@@ -234,7 +234,10 @@ impl HomeView {
                 if let Err(e) = tmux_session.send_keys_with_delay(wake_msg, delay) {
                     tracing::warn!("failed to send wake-up message after restart: {}", e);
                 }
-            });
+            })
+        {
+            tracing::warn!(?err, "restart wake worker failed to spawn");
+        }
         Ok(())
     }
 

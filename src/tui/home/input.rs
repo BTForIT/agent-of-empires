@@ -580,9 +580,10 @@ impl HomeView {
                     let profile = data.profile.as_deref();
                     let tool = data.tool.as_deref();
                     if let Err(e) = self.restart_selected_session(profile, tool) {
-                        tracing::error!("restart_selected_session failed: {}", e);
-                        // Surface the failure so the user knows the restart
-                        // did not take; log-only left the TUI silent.
+                        // InfoDialog is the canonical user-facing channel for this
+                        // failure; keep a debug-log breadcrumb at warn! so investigations
+                        // still find it without firing the error! alarm.
+                        tracing::warn!("restart_selected_session failed: {}", e);
                         self.info_dialog =
                             Some(InfoDialog::new("Restart Failed", &format!("{}", e)));
                     }
@@ -862,13 +863,25 @@ impl HomeView {
                 self.show_help = true;
             }
             KeyCode::Char('e') if !self.strict_hotkeys => {
-                self.open_restart_dialog();
+                if !self.available_tools.any_available() {
+                    self.show_no_agents();
+                } else {
+                    self.open_restart_dialog();
+                }
             }
             KeyCode::Char('E') if self.strict_hotkeys => {
-                self.open_restart_dialog();
+                if !self.available_tools.any_available() {
+                    self.show_no_agents();
+                } else {
+                    self.open_restart_dialog();
+                }
             }
             KeyCode::F(5) => {
-                self.open_restart_dialog();
+                if !self.available_tools.any_available() {
+                    self.show_no_agents();
+                } else {
+                    self.open_restart_dialog();
+                }
             }
             KeyCode::Char('P') => {
                 self.show_profile_picker();
